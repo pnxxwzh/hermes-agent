@@ -1,0 +1,42 @@
+[
+  {
+    "name": "FX-1 socksio fact",
+    "messages": [
+      {"role": "user", "content": "以后遇到 SOCKS 代理问题，先检查 socksio 是否安装。"},
+      {"role": "assistant", "content": "明白，这说明 httpx 走 SOCKS 代理时需要 socksio 支持。"}
+    ],
+    "min_items": 1,
+    "max_items": 2,
+    "allowed_empty": false
+  },
+  {
+    "name": "FX-2 concise preference",
+    "messages": [
+      {"role": "user", "content": "以后回答我尽量简洁，不要重复解释。"},
+      {"role": "assistant", "content": "收到，后续我会优先简洁表达。"}
+    ],
+    "min_items": 1,
+    "max_items": 2,
+    "allowed_empty": false
+  },
+  {
+    "name": "FX-3 greeting empty",
+    "messages": [
+      {"role": "user", "content": "你好"},
+      {"role": "assistant", "content": "你好，有什么我可以帮你的吗？"}
+    ],
+    "min_items": 0,
+    "max_items": 0,
+    "allowed_empty": true
+  },
+  {
+    "name": "FX-4 temporary task state empty",
+    "messages": [
+      {"role": "user", "content": "你先别回，我还在上传第二张图。"},
+      {"role": "assistant", "content": "好的，我等你继续。"}
+    ],
+    "min_items": 0,
+    "max_items": 0,
+    "allowed_empty": true
+  }
+]

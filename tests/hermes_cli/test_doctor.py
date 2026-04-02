@@ -136,3 +136,228 @@ def test_check_gateway_service_linger_skips_when_service_not_installed(monkeypat
     out = capsys.readouterr().out
     assert out == ""
     assert issues == []
+
+
+def test_check_sparkgraph_reports_ready_without_network_probe(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(doctor_mod, "HERMES_HOME", tmp_path)
+    monkeypatch.setattr(doctor_mod, "_DHH", "~/.hermes")
+    monkeypatch.setattr(
+        doctor_mod,
+        "load_config",
+        lambda: {
+            "sparkgraph": {
+                "mode": "flush_integrated",
+                "db_path": "",
+                "recall": {
+                    "enabled": True,
+                    "max_items": 4,
+                    "max_related": 4,
+                    "budget_ratio": 0.12,
+                    "max_chars": 1800,
+                },
+                "embedding": {
+                    "provider": "",
+                    "model": "",
+                    "base_url": "",
+                    "api_key": "",
+                    "timeout": 20,
+                },
+            }
+        },
+    )
+    monkeypatch.setattr(
+        "gateway.status.sparkgraph_runtime_status",
+        lambda **kwargs: {
+            "healthy": True,
+            "degraded": False,
+            "embedding": {
+                "enabled": False,
+                "healthy": False,
+                "degraded": False,
+                "reason": "embedding runtime disabled",
+            },
+        },
+    )
+
+    issues = []
+    doctor_mod._check_sparkgraph(issues)
+
+    out = capsys.readouterr().out
+    assert "◆ SparkGraph" in out
+    assert "SparkGraph config parsed" in out
+    assert "SparkGraph runtime ready" in out
+    assert "Embedding runtime disabled" in out
+    assert issues == []
+
+
+def test_check_sparkgraph_runtime_ready_when_db_parent_exists(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(doctor_mod, "HERMES_HOME", tmp_path)
+    monkeypatch.setattr(doctor_mod, "_DHH", "~/.hermes")
+    (tmp_path / "sparkgraph").mkdir(parents=True)
+    monkeypatch.setattr(
+        doctor_mod,
+        "load_config",
+        lambda: {
+            "sparkgraph": {
+                "mode": "flush_integrated",
+                "db_path": "",
+                "recall": {
+                    "enabled": True,
+                    "max_items": 4,
+                    "max_related": 4,
+                    "budget_ratio": 0.12,
+                    "max_chars": 1800,
+                },
+                "embedding": {
+                    "provider": "",
+                    "model": "",
+                    "base_url": "",
+                    "api_key": "",
+                    "timeout": 20,
+                },
+            }
+        },
+    )
+    monkeypatch.setattr(
+        "gateway.status.sparkgraph_runtime_status",
+        lambda **kwargs: {
+            "healthy": True,
+            "degraded": False,
+            "embedding": {
+                "enabled": False,
+                "healthy": False,
+                "degraded": False,
+                "reason": "embedding runtime disabled",
+            },
+        },
+    )
+
+    issues = []
+    doctor_mod._check_sparkgraph(issues)
+
+    out = capsys.readouterr().out
+    assert "SparkGraph DB parent exists" in out
+    assert "SparkGraph runtime ready" in out
+    assert issues == []
+
+
+def test_check_sparkgraph_reports_invalid_config(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(doctor_mod, "HERMES_HOME", tmp_path)
+    monkeypatch.setattr(doctor_mod, "_DHH", "~/.hermes")
+    monkeypatch.setattr(doctor_mod, "load_config", lambda: {"sparkgraph": {"mode": "bad-mode"}})
+
+    issues = []
+    doctor_mod._check_sparkgraph(issues)
+
+    out = capsys.readouterr().out
+    assert "SparkGraph config invalid" in out
+    assert issues == ["Fix sparkgraph config in config.yaml"]
+
+
+def test_check_sparkgraph_enables_probe_when_requested(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(doctor_mod, "HERMES_HOME", tmp_path)
+    monkeypatch.setattr(doctor_mod, "_DHH", "~/.hermes")
+    monkeypatch.setattr(
+        doctor_mod,
+        "load_config",
+        lambda: {
+            "sparkgraph": {
+                "mode": "flush_integrated",
+                "db_path": "",
+                "recall": {
+                    "enabled": True,
+                    "max_items": 4,
+                    "max_related": 4,
+                    "budget_ratio": 0.12,
+                    "max_chars": 1800,
+                },
+                "embedding": {
+                    "provider": "openai-compatible",
+                    "model": "text-embedding-3-small",
+                    "base_url": "http://localhost:8000",
+                    "api_key": "",
+                    "timeout": 20,
+                },
+            }
+        },
+    )
+
+    seen = {}
+
+    def _fake_status(*, probe_enabled=False):
+        seen["probe_enabled"] = probe_enabled
+        return {
+            "healthy": True,
+            "degraded": False,
+            "embedding": {
+                "enabled": True,
+                "healthy": True,
+                "degraded": False,
+                "reason": "",
+            },
+        }
+
+    monkeypatch.setattr("gateway.status.sparkgraph_runtime_status", _fake_status)
+
+    issues = []
+    doctor_mod._check_sparkgraph(issues, probe_enabled=True)
+
+    out = capsys.readouterr().out
+    assert "Embedding runtime configured" in out
+    assert seen["probe_enabled"] is True
+
+
+def test_check_sparkgraph_warns_on_last_failed_eval(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(doctor_mod, "HERMES_HOME", tmp_path)
+    monkeypatch.setattr(doctor_mod, "_DHH", "~/.hermes")
+    monkeypatch.setattr(
+        doctor_mod,
+        "load_config",
+        lambda: {
+            "sparkgraph": {
+                "mode": "flush_integrated",
+                "db_path": "",
+                "recall": {
+                    "enabled": True,
+                    "max_items": 4,
+                    "max_related": 4,
+                    "budget_ratio": 0.12,
+                    "max_chars": 1800,
+                },
+                "embedding": {
+                    "provider": "",
+                    "model": "",
+                    "base_url": "",
+                    "api_key": "",
+                    "timeout": 20,
+                },
+            }
+        },
+    )
+    monkeypatch.setattr(
+        "gateway.status.sparkgraph_runtime_status",
+        lambda **kwargs: {
+            "healthy": True,
+            "degraded": False,
+            "embedding": {
+                "enabled": False,
+                "healthy": False,
+                "degraded": False,
+                "reason": "embedding runtime disabled",
+            },
+        },
+    )
+    monkeypatch.setattr(
+        "agent.sparkgraph.flush_eval.load_flush_eval_report",
+        lambda **kwargs: {
+            "generated_at": "2026-04-02T10:00:00+00:00",
+            "summary": {"passed": 4, "total": 5},
+        },
+    )
+
+    issues = []
+    doctor_mod._check_sparkgraph(issues)
+
+    out = capsys.readouterr().out
+    assert "Last SparkGraph flush eval has failures" in out
+    assert "Rerun SparkGraph flush eval and inspect failing fixtures" in issues

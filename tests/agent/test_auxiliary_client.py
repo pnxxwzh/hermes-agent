@@ -18,6 +18,7 @@ from agent.auxiliary_client import (
     _get_auxiliary_provider,
     _resolve_forced_provider,
     _resolve_auto,
+    _resolve_task_provider_model,
 )
 
 
@@ -709,6 +710,29 @@ class TestAuxiliaryPoolAwareness:
         assert client is not None
         assert client.__class__.__name__ == "AnthropicAuxiliaryClient"
         assert model == "claude-haiku-4-5-20251001"
+
+    def test_flush_memories_uses_explicit_auxiliary_config(self):
+        config = {
+            "auxiliary": {
+                "flush_memories": {
+                    "provider": "minimax-cn",
+                    "model": "MiniMax-M2.7-highspeed",
+                    "base_url": "https://api.minimaxi.com/anthropic",
+                    "api_key": "",
+                    "timeout": 30,
+                }
+            }
+        }
+
+        with patch("hermes_cli.config.load_config", return_value=config):
+            provider, model, base_url, api_key = _resolve_task_provider_model(
+                "flush_memories", None, None, None, None
+            )
+
+        assert provider == "custom"
+        assert model == "MiniMax-M2.7-highspeed"
+        assert base_url == "https://api.minimaxi.com/anthropic"
+        assert api_key is None
 
     def test_selected_anthropic_provider_is_preferred_for_vision_auto(self, monkeypatch):
         monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")

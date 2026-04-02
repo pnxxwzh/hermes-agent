@@ -15,6 +15,7 @@ import importlib.util
 import logging
 import os
 import sys
+from copy import deepcopy
 from pathlib import Path
 from typing import Optional, Dict, Any
 
@@ -1201,6 +1202,244 @@ def setup_tts(config: dict):
 
 
 # =============================================================================
+# Section 1c: SparkGraph Configuration
+# =============================================================================
+
+
+def _sparkgraph_config(config: dict) -> dict:
+    sg = config.get("sparkgraph")
+    if not isinstance(sg, dict):
+        sg = {}
+        config["sparkgraph"] = sg
+    return sg
+
+
+def _sparkgraph_runtime_cfg(parent: dict, key: str) -> dict:
+    runtime = parent.get(key)
+    if not isinstance(runtime, dict):
+        runtime = {}
+        parent[key] = runtime
+    return runtime
+
+
+def _is_external_sparkgraph_db_path(db_path: str) -> bool:
+    if not db_path.strip():
+        return False
+    try:
+        from agent.sparkgraph.config import sparkgraph_home
+
+        target = Path(db_path).expanduser().resolve()
+        home = sparkgraph_home(get_hermes_home()).resolve()
+        return target.parent != home
+    except Exception:
+        return False
+
+
+_SPARKGRAPH_EMBEDDING_VENDOR_CHOICES = [
+    ("OpenAI-compatible", "openai-compatible"),
+    ("OpenAI", "openai"),
+    ("Anthropic", "anthropic"),
+    ("Custom vendor label", "__custom__"),
+]
+
+
+def _select_sparkgraph_embedding_vendor(current_provider: str) -> str:
+    current = (current_provider or "").strip()
+    vendor_choices = [label for label, _ in _SPARKGRAPH_EMBEDDING_VENDOR_CHOICES]
+    vendor_choices.append(f"Keep current ({current or 'openai-compatible'})")
+
+    default_idx = len(vendor_choices) - 1
+    for idx, (_, value) in enumerate(_SPARKGRAPH_EMBEDDING_VENDOR_CHOICES):
+        if current and current == value:
+            default_idx = idx
+            break
+
+    vendor_idx = prompt_choice("  Select embedding vendor:", vendor_choices, default_idx)
+    if vendor_idx == len(vendor_choices) - 1:
+        return current or "openai-compatible"
+
+    selected_value = _SPARKGRAPH_EMBEDDING_VENDOR_CHOICES[vendor_idx][1]
+    if selected_value == "__custom__":
+        return prompt("  Custom embedding vendor label", current or "custom").strip()
+    return selected_value
+
+
+def _probe_sparkgraph_embedding_config(config: dict) -> tuple[bool, str]:
+    from agent.sparkgraph.manager import SparkGraphManager
+    from hermes_constants import get_hermes_home
+
+    try:
+        snapshot = SparkGraphManager.from_raw_config(
+            config.get("sparkgraph", {}),
+            hermes_home=get_hermes_home(),
+        ).runtime_snapshot(probe_enabled=True)
+    except Exception as exc:
+        return False, str(exc)
+
+    if snapshot.embedding.enabled and not snapshot.embedding.degraded:
+        return True, ""
+
+    reason = snapshot.embedding.reason or snapshot.embedding.details.get("reason") or "probe failed"
+    return False, str(reason)
+
+
+def _configure_sparkgraph_embedding(config: dict, sg: dict) -> bool:
+    embedding = _sparkgraph_runtime_cfg(sg, "embedding")
+    emb_enabled = bool(embedding.get("provider") or embedding.get("model") or embedding.get("base_url"))
+    emb_current = "configured" if emb_enabled else "disabled"
+    emb_choices = [
+        "Configure custom embedding endpoint",
+        "Disable embedding runtime",
+        f"Keep current ({emb_current})",
+    ]
+
+    while True:
+        emb_idx = prompt_choice("Select SparkGraph embedding runtime:", emb_choices, 2)
+        if emb_idx == 1:
+            embedding.update({
+                "provider": "",
+                "model": "",
+                "base_url": "",
+                "api_key": "",
+                "timeout": int(embedding.get("timeout", 20) or 20),
+            })
+            return True
+        if emb_idx == 2:
+            return True
+
+        candidate = dict(embedding)
+        candidate["provider"] = _select_sparkgraph_embedding_vendor(str(embedding.get("provider", "")))
+        candidate["base_url"] = prompt("  Embedding base URL", str(embedding.get("base_url", "") or "")).strip()
+        candidate["model"] = prompt(
+            "  Embedding model",
+            str(embedding.get("model", "") or "text-embedding-3-small"),
+        ).strip()
+        candidate["api_key"] = prompt(
+            "  Embedding API key (optional)",
+            str(embedding.get("api_key", "") or ""),
+            password=True,
+        ).strip()
+        timeout_raw = prompt("  Embedding timeout (seconds)", str(embedding.get("timeout", 20) or 20))
+        try:
+            candidate["timeout"] = max(1, int(timeout_raw))
+        except ValueError:
+            candidate["timeout"] = int(embedding.get("timeout", 20) or 20)
+
+        embedding.update(candidate)
+        save_config(config)
+
+        print_info("Validating SparkGraph embedding runtime...")
+        ok, reason = _probe_sparkgraph_embedding_config(config)
+        if ok:
+            print_success("✓ SparkGraph embedding runtime reachable and ready")
+            return True
+
+        print_error(f"✗ SparkGraph embedding runtime probe failed ({reason})")
+        failure_idx = prompt_choice(
+            "Embedding probe failed. What would you like to do?",
+            [
+                "Reconfigure embedding",
+                "Keep this embedding configuration anyway",
+                "Restore SparkGraph defaults",
+            ],
+            1,
+        )
+        if failure_idx == 0:
+            continue
+        if failure_idx == 2:
+            from agent.sparkgraph.config import DEFAULT_SPARKGRAPH_CONFIG
+
+            config["sparkgraph"] = deepcopy(DEFAULT_SPARKGRAPH_CONFIG)
+            save_config(config)
+            print_success("SparkGraph configuration restored to defaults")
+            return False
+        return True
+
+
+def setup_sparkgraph(config: dict):
+    """Configure SparkGraph runtime settings exposed in the setup wizard."""
+    print_header("SparkGraph")
+    print_info("Configure Hermes' structured knowledge supplement.")
+    print_info("Mainline extraction still runs only during flush; this section")
+    print_info("controls recall and the optional embedding runtime.")
+    print()
+
+    from agent.sparkgraph.config import DEFAULT_SPARKGRAPH_CONFIG
+
+    sg = _sparkgraph_config(config)
+
+    current_recall = sg.get("recall") if isinstance(sg.get("recall"), dict) else {}
+    current_embedding = sg.get("embedding") if isinstance(sg.get("embedding"), dict) else {}
+    current_summary = (
+        f"recall={'on' if bool(current_recall.get('enabled', True)) else 'off'}, "
+        f"embedding={'on' if bool(current_embedding.get('provider') or current_embedding.get('model') or current_embedding.get('base_url')) else 'off'}"
+    )
+    action_idx = prompt_choice(
+        "SparkGraph setup action:",
+        [
+            "Reconfigure SparkGraph",
+            "Restore SparkGraph defaults",
+            f"Keep current settings ({current_summary})",
+        ],
+        2,
+    )
+    if action_idx == 2:
+        print_info("Keeping current SparkGraph settings.")
+        return
+    if action_idx == 1:
+        config["sparkgraph"] = deepcopy(DEFAULT_SPARKGRAPH_CONFIG)
+        save_config(config)
+        print_success("SparkGraph configuration restored to defaults")
+        return
+
+    # Recall
+    recall = sg.get("recall")
+    if not isinstance(recall, dict):
+        recall = {}
+        sg["recall"] = recall
+    recall_enabled = bool(recall.get("enabled", True))
+    recall["enabled"] = prompt_yes_no("Enable SparkGraph recall injection?", recall_enabled)
+
+    current_chars = int(recall.get("max_chars", 1800) or 1800)
+    current_items = int(recall.get("max_items", 4) or 4)
+    current_related = int(recall.get("max_related", 4) or 4)
+
+    max_items_raw = prompt("Recall max items", str(current_items))
+    max_related_raw = prompt("Recall max related nodes", str(current_related))
+    max_chars_raw = prompt("Recall max chars", str(current_chars))
+    try:
+        recall["max_items"] = max(1, int(max_items_raw))
+    except ValueError:
+        pass
+    try:
+        recall["max_related"] = max(1, int(max_related_raw))
+    except ValueError:
+        pass
+    try:
+        recall["max_chars"] = max(128, int(max_chars_raw))
+    except ValueError:
+        pass
+
+    # db_path
+    current_db_path = str(sg.get("db_path", "") or "")
+    db_path = prompt(
+        "Custom SparkGraph DB path (blank = profile default)",
+        current_db_path,
+    ).strip()
+    sg["db_path"] = db_path
+    if _is_external_sparkgraph_db_path(db_path):
+        print_warning("Custom SparkGraph DB path is outside the current profile scope.")
+        print_info("This works, but it deviates from the recommended Hermes profile layout.")
+
+    # Embedding runtime
+    if not _configure_sparkgraph_embedding(config, sg):
+        return
+
+    save_config(config)
+    print_success("SparkGraph configuration updated")
+
+
+# =============================================================================
 # Section 2: Terminal Backend Configuration
 # =============================================================================
 
@@ -2334,6 +2573,15 @@ def _get_section_config_summary(config: dict, section_key: str) -> Optional[str]
             return ", ".join(tools)
         return None
 
+    elif section_key == "sparkgraph":
+        sg = config.get("sparkgraph")
+        if not isinstance(sg, dict):
+            return None
+        recall_enabled = bool(sg.get("recall", {}).get("enabled", True)) if isinstance(sg.get("recall"), dict) else True
+        embedding = sg.get("embedding") if isinstance(sg.get("embedding"), dict) else {}
+        embedding_on = bool(embedding.get("provider") or embedding.get("model") or embedding.get("base_url"))
+        return f"recall: {'on' if recall_enabled else 'off'}, embedding: {'on' if embedding_on else 'off'}"
+
     return None
 
 
@@ -2469,6 +2717,7 @@ SETUP_SECTIONS = [
     ("terminal", "Terminal Backend", setup_terminal_backend),
     ("gateway", "Messaging Platforms (Gateway)", setup_gateway),
     ("tools", "Tools", setup_tools),
+    ("sparkgraph", "SparkGraph", setup_sparkgraph),
     ("agent", "Agent Settings", setup_agent_settings),
 ]
 
@@ -2595,6 +2844,7 @@ def run_setup_wizard(args):
             "Terminal Backend",
             "Messaging Platforms (Gateway)",
             "Tools",
+            "SparkGraph",
             "Agent Settings",
             "---",
             "Exit",
@@ -2611,18 +2861,18 @@ def run_setup_wizard(args):
         elif choice == 1:
             # Full setup — fall through to run all sections
             pass
-        elif choice in (2, 8):
+        elif choice in (2, 9):
             # Separator — treat as exit
             print_info("Exiting. Run 'hermes setup' again when ready.")
             return
-        elif choice == 9:
+        elif choice == 10:
             print_info("Exiting. Run 'hermes setup' again when ready.")
             return
-        elif 3 <= choice <= 7:
+        elif 3 <= choice <= 8:
             # Individual section — map by key, not by position.
             # SETUP_SECTIONS includes TTS but the returning-user menu skips it,
             # so positional indexing (choice - 3) would dispatch the wrong section.
-            _RETURNING_USER_SECTION_KEYS = ["model", "terminal", "gateway", "tools", "agent"]
+            _RETURNING_USER_SECTION_KEYS = ["model", "terminal", "gateway", "tools", "sparkgraph", "agent"]
             section_key = _RETURNING_USER_SECTION_KEYS[choice - 3]
             section = next((s for s in SETUP_SECTIONS if s[0] == section_key), None)
             if section:
@@ -2688,6 +2938,10 @@ def run_setup_wizard(args):
     # Section 5: Tools
     if not (migration_ran and _skip_configured_section(config, "tools", "Tools")):
         setup_tools(config, first_install=not is_existing)
+
+    # Section 6: SparkGraph
+    if not (migration_ran and _skip_configured_section(config, "sparkgraph", "SparkGraph")):
+        setup_sparkgraph(config)
 
     # Save and show summary
     save_config(config)

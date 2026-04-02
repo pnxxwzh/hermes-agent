@@ -9,7 +9,7 @@ import sys
 import subprocess
 import shutil
 
-from hermes_cli.config import get_project_root, get_hermes_home, get_env_path
+from hermes_cli.config import get_project_root, get_hermes_home, get_env_path, load_config
 from hermes_constants import display_hermes_home
 
 PROJECT_ROOT = get_project_root()
@@ -123,6 +123,72 @@ def _check_gateway_service_linger(issues: list[str]) -> None:
         issues.append("Enable linger for the gateway user service: sudo loginctl enable-linger $USER")
     else:
         check_warn("Could not verify systemd linger", f"({linger_detail})")
+
+
+def _check_sparkgraph(issues: list[str], *, probe_enabled: bool = False) -> None:
+    """Run non-blocking SparkGraph config/runtime diagnostics."""
+    print()
+    print(color("◆ SparkGraph", Colors.CYAN, Colors.BOLD))
+
+    try:
+        from agent.sparkgraph.config import parse_sparkgraph_config, sparkgraph_home
+        from agent.sparkgraph.flush_eval import load_flush_eval_report
+        from gateway.status import sparkgraph_runtime_status
+
+        raw = load_config().get("sparkgraph", {})
+        config = parse_sparkgraph_config(raw, hermes_home=HERMES_HOME)
+        report = load_flush_eval_report(hermes_home=HERMES_HOME)
+    except Exception as exc:
+        check_fail("SparkGraph config invalid", f"({exc})")
+        issues.append("Fix sparkgraph config in config.yaml")
+        return
+
+    check_ok("SparkGraph config parsed", f"(mode={config.mode})")
+
+    graph_home = sparkgraph_home(HERMES_HOME)
+    if graph_home.exists():
+        check_ok(f"{_DHH}/sparkgraph/ directory exists")
+    else:
+        check_warn(f"{_DHH}/sparkgraph/ not found", "(will be created on first use)")
+
+    if config.db_path.parent.exists():
+        check_ok(f"SparkGraph DB parent exists", f"({config.db_path.parent})")
+    else:
+        check_warn("SparkGraph DB parent missing", f"({config.db_path.parent})")
+        if config.db_path.parent != graph_home:
+            issues.append("Create SparkGraph DB parent directory or rerun setup")
+
+    runtime = sparkgraph_runtime_status(probe_enabled=probe_enabled)
+    if runtime is None:
+        check_warn("SparkGraph runtime status unavailable")
+        issues.append("SparkGraph runtime status unavailable")
+        return
+
+    if runtime.get("degraded"):
+        check_warn("SparkGraph runtime degraded")
+        issues.append("Resolve degraded SparkGraph runtime configuration")
+    else:
+        check_ok("SparkGraph runtime ready")
+
+    embedding = runtime.get("embedding", {})
+    if embedding.get("enabled"):
+        if embedding.get("degraded"):
+            check_warn("Embedding runtime degraded", f"({embedding.get('reason') or 'check config'})")
+        else:
+            check_ok("Embedding runtime configured")
+    else:
+        check_info("Embedding runtime disabled (FTS-only recall fallback)")
+
+    if isinstance(report, dict):
+        summary = report.get("summary", {})
+        passed = int(summary.get("passed", 0))
+        total = int(summary.get("total", 0))
+        generated_at = report.get("generated_at", "(unknown)")
+        if total > 0 and passed < total:
+            check_warn("Last SparkGraph flush eval has failures", f"({passed}/{total} at {generated_at})")
+            issues.append("Rerun SparkGraph flush eval and inspect failing fixtures")
+        elif total > 0:
+            check_ok("Last SparkGraph flush eval clean", f"({passed}/{total} at {generated_at})")
 
 
 def run_doctor(args):
@@ -381,6 +447,7 @@ def run_doctor(args):
         check_info(f"{_DHH}/state.db not created yet (will be created on first session)")
 
     _check_gateway_service_linger(issues)
+    _check_sparkgraph(issues, probe_enabled=getattr(args, "probe", False))
     
     # =========================================================================
     # Check: External tools

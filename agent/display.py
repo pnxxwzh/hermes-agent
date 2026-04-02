@@ -917,6 +917,17 @@ def get_cute_tool_message(
         elif action == "remove":
             return _wrap(f"┊ 🧠 memory    -{target}: \"{_trunc(args.get('old_text', ''), 20)}\"  {dur}")
         return _wrap(f"┊ 🧠 memory    {action}  {dur}")
+    if tool_name == "sparkgraph_record":
+        items = args.get("items", [])
+        if isinstance(items, list) and items:
+            first = items[0] if isinstance(items[0], dict) else {}
+            node_type = str(first.get("type", "")).strip().upper()
+            summary = str(first.get("summary", "")).strip()
+            if len(items) == 1 and summary:
+                type_label = f"{node_type}: " if node_type else ""
+                return _wrap(f"┊ ✨ sparkgraph +{type_label}\"{_trunc(summary, 30)}\"  {dur}")
+            return _wrap(f"┊ ✨ sparkgraph +{len(items)} items  {dur}")
+        return _wrap(f"┊ ✨ sparkgraph record  {dur}")
     if tool_name == "skills_list":
         return _wrap(f"┊ 📚 skills    list {args.get('category', 'all')}  {dur}")
     if tool_name == "skill_view":
@@ -961,6 +972,40 @@ def get_cute_tool_message(
 
     preview = build_tool_preview(tool_name, args) or ""
     return _wrap(f"┊ ⚡ {tool_name[:9]:9} {_trunc(preview, 35)}  {dur}")
+
+
+def format_sparkgraph_recall_message(recall_block: str) -> str | None:
+    """Build a one-line CLI hint when SparkGraph recall is injected."""
+    if not recall_block:
+        return None
+
+    summaries: list[str] = []
+    for raw_line in recall_block.splitlines():
+        line = raw_line.strip()
+        if not line.startswith("- ["):
+            continue
+        parts = line.split("] ", 1)
+        if len(parts) != 2:
+            continue
+        summary = parts[1].strip()
+        if summary:
+            summaries.append(summary)
+
+    if not summaries:
+        return None
+
+    def _trunc(text: str, limit: int = 70) -> str:
+        if _tool_preview_max_len > 0:
+            limit = min(limit, _tool_preview_max_len)
+        return text if len(text) <= limit else text[: limit - 3] + "..."
+
+    count = len(summaries)
+    first = _trunc(summaries[0])
+    line = f'┊ ✨ recall    +{count}: "{first}"'
+    skin_prefix = get_skin_tool_prefix()
+    if skin_prefix != "┊":
+        line = line.replace("┊", skin_prefix, 1)
+    return line
 
 
 # =========================================================================

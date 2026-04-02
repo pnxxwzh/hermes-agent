@@ -18,6 +18,9 @@ import pytest
 
 import run_agent
 from honcho_integration.client import HonchoClientConfig
+from agent.sparkgraph.manager import SparkGraphManager
+from agent.sparkgraph.store import SparkGraphNodeInput
+from agent.sparkgraph.types import NodeStatus, NodeType
 from run_agent import AIAgent, _inject_honcho_turn_context
 from agent.prompt_builder import DEFAULT_AGENT_IDENTITY
 
@@ -257,6 +260,7 @@ class TestExtractReasoning:
         msg = _mock_assistant_msg(reasoning="thinking hard")
         assert agent._extract_reasoning(msg) == "thinking hard"
 
+
     def test_reasoning_content_field(self, agent):
         msg = _mock_assistant_msg(reasoning_content="deep thought")
         assert agent._extract_reasoning(msg) == "deep thought"
@@ -302,6 +306,207 @@ class TestExtractReasoning:
     def test_inline_reasoning_blocks_fallback(self, agent, content, expected):
         msg = _mock_assistant_msg(content=content)
         assert agent._extract_reasoning(msg) == expected
+
+
+class TestSparkGraphBackgroundReview:
+    def test_build_background_review_prompt_adds_sparkgraph_guidance(self, agent):
+        agent._sparkgraph_enabled = True
+
+        prompt = agent._build_background_review_prompt(
+            review_memory=True,
+            review_skills=False,
+        )
+
+        assert "sparkgraph_record" in prompt
+        assert "durable knowledge points" in prompt
+
+    def test_enable_background_review_sparkgraph_appends_tool(self, agent):
+        agent._sparkgraph_enabled = True
+        review_agent = SimpleNamespace(
+            _sparkgraph_enabled=True,
+            _sparkgraph_store=MagicMock(),
+            tools=[],
+            valid_tool_names=set(),
+        )
+
+        enabled = agent._enable_background_review_sparkgraph(review_agent)
+
+        assert enabled is True
+        assert "sparkgraph_record" in review_agent.valid_tool_names
+        assert any(t["function"]["name"] == "sparkgraph_record" for t in review_agent.tools)
+
+    def test_invoke_tool_executes_sparkgraph_with_agent_store(self, agent):
+        agent._sparkgraph_enabled = True
+        agent._sparkgraph_store = MagicMock()
+        agent._user_turn_count = 7
+        agent.session_id = "session-123"
+
+        with (
+            patch(
+                "tools.sparkgraph_tool.sparkgraph_record_tool",
+                return_value=json.dumps({"success": True}),
+            ) as mock_record,
+            patch(
+                "agent.sparkgraph.maintenance.run_flush_maintenance",
+                return_value={"scanned": 1, "deprecated": 0},
+            ) as mock_maintenance,
+        ):
+            result = agent._invoke_tool(
+                "sparkgraph_record",
+                {
+                    "items": [
+                        {
+                            "summary": "SOCKS proxy errors may need socksio",
+                            "type": "FACT",
+                            "evidence": "Install socksio if SOCKS proxy support is missing.",
+                        }
+                    ]
+                },
+                "task-1",
+            )
+
+        payload = json.loads(result)
+        assert payload["success"] is True
+        mock_record.assert_called_once()
+        assert mock_record.call_args.kwargs["store"] is agent._sparkgraph_store
+        assert mock_record.call_args.kwargs["session_id"] == "session-123"
+        assert mock_record.call_args.kwargs["turn_index"] == 7
+        assert mock_record.call_args.kwargs["source_kind"] == "review"
+        mock_maintenance.assert_called_once()
+        assert mock_maintenance.call_args.args == (agent._sparkgraph_store,)
+        assert "embedding_config" in mock_maintenance.call_args.kwargs
+
+    def test_background_review_summary_marks_sparkgraph_skipped(self, agent):
+        agent._sparkgraph_enabled = True
+        agent._memory_store = MagicMock()
+        captured = []
+        agent._safe_print = captured.append
+
+        review_messages = [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": "memory",
+                            "arguments": "{}",
+                        }
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "content": json.dumps(
+                    {
+                        "success": True,
+                        "message": "Entry added",
+                        "target": "memory",
+                    }
+                ),
+            },
+        ]
+
+        def _fake_run_conversation(*args, **kwargs):
+            review_agent = kwargs.get("self_ref")  # never used
+            return {"final_response": "ok"}
+
+        with (
+            patch("run_agent.AIAgent") as mock_review_cls,
+            patch.object(agent, "_enable_background_review_sparkgraph", return_value=True),
+        ):
+            review_agent = MagicMock()
+            review_agent._session_messages = review_messages
+            review_agent.client = None
+            mock_review_cls.return_value = review_agent
+
+            agent._spawn_background_review(
+                messages_snapshot=[{"role": "user", "content": "Remember this rule"}],
+                review_memory=True,
+                review_skills=False,
+            )
+
+            # background thread is detached; wait briefly for it to finish
+            import time
+            time.sleep(0.2)
+
+        assert any("SparkGraph skipped" in line for line in captured)
+
+    def test_extract_background_review_memory_items(self, agent):
+        items = agent._extract_background_review_memory_items(
+            [
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": "memory",
+                                "arguments": json.dumps(
+                                    {
+                                        "action": "add",
+                                        "target": "memory",
+                                        "content": "If SOCKS proxy requests fail, first check whether socksio is installed.",
+                                    }
+                                ),
+                            }
+                        }
+                    ],
+                }
+            ]
+        )
+
+        assert items == [
+            {
+                "summary": "If SOCKS proxy requests fail, first check whether socksio is installed.",
+                "type": "ISSUE",
+                "evidence": "If SOCKS proxy requests fail, first check whether socksio is installed.",
+            }
+        ]
+
+    def test_extract_background_review_memory_items_keeps_generic_notes_as_fact(self, agent):
+        items = agent._extract_background_review_memory_items(
+            [
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": "memory",
+                                "arguments": json.dumps(
+                                    {
+                                        "action": "add",
+                                        "target": "memory",
+                                        "content": "Workspace convention: default notes go to memory/YYYY-MM-DD.md",
+                                    }
+                                ),
+                            }
+                        }
+                    ],
+                }
+            ]
+        )
+
+        assert items == [
+            {
+                "summary": "Workspace convention: default notes go to memory/YYYY-MM-DD.md",
+                "type": "FACT",
+                "evidence": "Workspace convention: default notes go to memory/YYYY-MM-DD.md",
+            }
+        ]
+
+    def test_build_sparkgraph_item_from_memory_entry_for_troubleshooting(self, agent):
+        item = agent._build_sparkgraph_item_from_memory_entry(
+            "排障经验：Git 提示文件没改动却无法提交时，检查行尾符自动转换（LF/CRLF）和文件权限位变化。"
+        )
+
+        assert item == {
+            "summary": "Git 提示文件没改动却无法提交时，检查行尾符自动转换（LF/CRLF）和文件权限位变化。",
+            "type": "ISSUE",
+            "evidence": "排障经验：Git 提示文件没改动却无法提交时，检查行尾符自动转换（LF/CRLF）和文件权限位变化。",
+        }
+
+    def test_build_sparkgraph_item_from_memory_entry_skips_generic_note(self, agent):
+        item = agent._build_sparkgraph_item_from_memory_entry("Rules: Default notes go to memory/YYYY-MM-DD.md")
+        assert item is None
 
 
 class TestCleanSessionContent:
@@ -1463,6 +1668,153 @@ class TestRunConversation:
         assert result["final_response"] == "Got it"
         assert result["completed"] is True
         assert result["api_calls"] == 2
+
+    def test_sparkgraph_recall_block_is_ephemeral(self, agent):
+        self._setup_agent(agent)
+        agent._sparkgraph_enabled = True
+        agent._sparkgraph_manager = MagicMock()
+        agent._sparkgraph_manager.build_recall_block.return_value = (
+            "[SparkGraph Recall]\n- [FACT] socksio may be required for SOCKS proxy support"
+        )
+        original_cached = agent._cached_system_prompt
+
+        resp = _mock_response(content="Final answer", finish_reason="stop")
+        agent.client.chat.completions.create.return_value = resp
+
+        with (
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("How do I fix SOCKS proxy errors?")
+
+        assert result["completed"] is True
+        call_args = agent.client.chat.completions.create.call_args
+        assert call_args is not None
+        api_messages = call_args.kwargs.get("messages") or call_args[1].get("messages")
+        assert api_messages[0]["role"] == "system"
+        assert "[SparkGraph Recall]" in api_messages[0]["content"]
+        assert "socksio may be required" in api_messages[0]["content"]
+        assert agent._cached_system_prompt == original_cached
+
+    def test_sparkgraph_recall_prints_visible_cli_hint(self, agent):
+        self._setup_agent(agent)
+        agent._sparkgraph_enabled = True
+        agent._sparkgraph_manager = MagicMock()
+        agent._sparkgraph_manager.build_recall_block.return_value = (
+            "[SparkGraph Recall]\n"
+            "Use these retrieved knowledge points if they help answer the current turn.\n"
+            "- [ISSUE] PostgreSQL 连接超时时先检查监听地址和 pg_hba.conf"
+        )
+        agent._print_fn = MagicMock()
+
+        resp = _mock_response(content="Final answer", finish_reason="stop")
+        agent.client.chat.completions.create.return_value = resp
+
+        with (
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("PostgreSQL 连接超时怎么办")
+
+        assert result["completed"] is True
+        agent._print_fn.assert_any_call(
+            '┊ ✨ recall    +1: "PostgreSQL 连接超时时先检查监听地址和 pg_hba.conf"'
+        )
+
+    def test_sparkgraph_recall_disabled_does_not_inject(self, agent):
+        self._setup_agent(agent)
+        agent._sparkgraph_enabled = True
+        agent._sparkgraph_manager = MagicMock()
+        agent._sparkgraph_manager.build_recall_block.return_value = ""
+        original_cached = agent._cached_system_prompt
+
+        resp = _mock_response(content="Final answer", finish_reason="stop")
+        agent.client.chat.completions.create.return_value = resp
+
+        with (
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("How do I fix SOCKS proxy errors?")
+
+        assert result["completed"] is True
+        call_args = agent.client.chat.completions.create.call_args
+        api_messages = call_args.kwargs.get("messages") or call_args[1].get("messages")
+        assert api_messages[0]["content"] == original_cached
+
+    def test_sparkgraph_recall_skips_deprecated_nodes_in_real_manager(self, agent, tmp_path):
+        self._setup_agent(agent)
+        agent._sparkgraph_enabled = True
+        agent._sparkgraph_manager = SparkGraphManager.from_raw_config({}, hermes_home=tmp_path)
+        store = agent._sparkgraph_manager.ensure_store()
+        store.insert_node(
+            SparkGraphNodeInput(
+                type=NodeType.FACT,
+                summary="Deprecated socksio fix",
+                canonical_key="deprecated-socksio-fix",
+                source_kind="flush",
+                status=NodeStatus.DEPRECATED,
+                confidence=0.95,
+                stability=0.95,
+                reuse_score=0.9,
+            )
+        )
+        original_cached = agent._cached_system_prompt
+
+        resp = _mock_response(content="Final answer", finish_reason="stop")
+        agent.client.chat.completions.create.return_value = resp
+
+        with (
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("How do I fix SOCKS proxy errors?")
+
+        assert result["completed"] is True
+        call_args = agent.client.chat.completions.create.call_args
+        api_messages = call_args.kwargs.get("messages") or call_args[1].get("messages")
+        assert "[SparkGraph Recall]" not in api_messages[0]["content"]
+        assert api_messages[0]["content"] == original_cached
+
+    def test_sparkgraph_recall_skips_low_stability_active_nodes_in_real_manager(self, agent, tmp_path):
+        self._setup_agent(agent)
+        agent._sparkgraph_enabled = True
+        agent._sparkgraph_manager = SparkGraphManager.from_raw_config({}, hermes_home=tmp_path)
+        store = agent._sparkgraph_manager.ensure_store()
+        store.insert_node(
+            SparkGraphNodeInput(
+                type=NodeType.FACT,
+                summary="socksio may be required for SOCKS proxy support",
+                canonical_key="socksio-proxy-support",
+                source_kind="flush",
+                status=NodeStatus.ACTIVE,
+                confidence=0.95,
+                stability=0.20,
+                reuse_score=0.9,
+            )
+        )
+        original_cached = agent._cached_system_prompt
+
+        resp = _mock_response(content="Final answer", finish_reason="stop")
+        agent.client.chat.completions.create.return_value = resp
+
+        with (
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("How do I fix SOCKS proxy errors?")
+
+        assert result["completed"] is True
+        call_args = agent.client.chat.completions.create.call_args
+        api_messages = call_args.kwargs.get("messages") or call_args[1].get("messages")
+        assert "[SparkGraph Recall]" not in api_messages[0]["content"]
+        assert api_messages[0]["content"] == original_cached
+        assert agent._cached_system_prompt == original_cached
 
     def test_empty_content_retry_uses_inline_reasoning_as_response(self, agent):
         """Reasoning-only payloads should recover the inline reasoning text."""

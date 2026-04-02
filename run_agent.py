@@ -93,6 +93,7 @@ from agent.usage_pricing import estimate_usage_cost, normalize_usage
 from agent.display import (
     KawaiiSpinner, build_tool_preview as _build_tool_preview,
     get_cute_tool_message as _get_cute_tool_message_impl,
+    format_sparkgraph_recall_message as _format_sparkgraph_recall_message,
     _detect_tool_failure,
     get_tool_emoji as _get_tool_emoji,
 )
@@ -1069,7 +1070,27 @@ class AIAgent:
                     self._memory_store.load_from_disk()
             except Exception:
                 pass  # Memory is optional -- don't break agent init
-        
+
+        # SparkGraph structured knowledge supplement (profile-scoped, flush-integrated)
+        self._sparkgraph_enabled = False
+        self._sparkgraph_manager = None
+        self._sparkgraph_store = None
+        try:
+            from agent.sparkgraph.manager import SparkGraphManager
+
+            sparkgraph_cfg = _agent_cfg.get("sparkgraph", {})
+            self._sparkgraph_manager = SparkGraphManager.from_raw_config(
+                sparkgraph_cfg,
+                hermes_home=get_hermes_home(),
+            )
+            self._sparkgraph_store = self._sparkgraph_manager.ensure_store()
+            self._sparkgraph_enabled = self._sparkgraph_manager.config.mode == "flush_integrated"
+        except Exception as e:
+            logger.warning("SparkGraph init failed — disabled: %s", e)
+            self._sparkgraph_enabled = False
+            self._sparkgraph_manager = None
+            self._sparkgraph_store = None
+
         # Honcho AI-native memory (cross-session user modeling)
         # Reads $HERMES_HOME/honcho.json (instance) or ~/.honcho/config.json (global).
         self._honcho = None  # HonchoSessionManager | None
@@ -1585,6 +1606,220 @@ class AIAgent:
         "If nothing stands out, just say 'Nothing to save.' and stop."
     )
 
+    _SPARKGRAPH_REVIEW_PROMPT = (
+        "\n\n**SparkGraph**: If you notice durable knowledge points that would be useful to "
+        "retrieve later, save them with sparkgraph_record. This includes reusable troubleshooting "
+        "guidance, stable factual rules, recurring issue patterns, lasting decisions, stable "
+        "resources, and stable preferences. When a reusable knowledge point appears, call "
+        "sparkgraph_record even if you also save something with the memory tool. Do not save "
+        "greetings, temporary task state, progress updates, or speculative guesses."
+    )
+
+    def _build_background_review_prompt(self, *, review_memory: bool, review_skills: bool) -> str:
+        """Build the background review prompt for memory/skill post-processing."""
+        if review_memory and review_skills:
+            prompt = self._COMBINED_REVIEW_PROMPT
+        elif review_memory:
+            prompt = self._MEMORY_REVIEW_PROMPT
+        else:
+            prompt = self._SKILL_REVIEW_PROMPT
+
+        if review_memory and self._sparkgraph_enabled:
+            prompt += self._SPARKGRAPH_REVIEW_PROMPT
+        return prompt
+
+    def _enable_background_review_sparkgraph(self, review_agent) -> bool:
+        """Expose sparkgraph_record to the review agent when SparkGraph is available.
+
+        Background review uses a normal agent loop rather than flush_memories(), so we
+        append the write-only review tool explicitly instead of globally exposing it in
+        the default toolsets.
+        """
+        if not self._sparkgraph_enabled:
+            return False
+        if not getattr(review_agent, "_sparkgraph_enabled", False):
+            return False
+        if not getattr(review_agent, "_sparkgraph_store", None):
+            return False
+
+        from tools.registry import registry as _tool_registry
+
+        sparkgraph_defs = _tool_registry.get_definitions({"sparkgraph_record"}, quiet=True)
+        if not sparkgraph_defs:
+            return False
+
+        existing_tools = list(getattr(review_agent, "tools", []) or [])
+        existing_names = set(getattr(review_agent, "valid_tool_names", set()) or set())
+        if "sparkgraph_record" in existing_names:
+            return True
+
+        review_agent.tools = existing_tools + sparkgraph_defs
+        review_agent.valid_tool_names = existing_names | {"sparkgraph_record"}
+        return True
+
+    def _run_sparkgraph_record_tool(self, function_args: dict, *, source_kind: str = "review") -> str:
+        """Execute sparkgraph_record with the current agent's store/session context."""
+        from tools.sparkgraph_tool import sparkgraph_record_tool as _sparkgraph_record_tool
+
+        function_result = _sparkgraph_record_tool(
+            items=function_args.get("items", []),
+            store=self._sparkgraph_store,
+            session_id=self.session_id,
+            turn_index=int(getattr(self, "_user_turn_count", 0) or 0),
+            source_kind=source_kind,
+            embedding_config=(self._sparkgraph_manager.config.embedding if self._sparkgraph_manager else None),
+        )
+
+        try:
+            payload = json.loads(function_result)
+        except (TypeError, json.JSONDecodeError):
+            payload = {}
+
+        logger.warning(
+            "sparkgraph_record tool executed: source_kind=%s items=%s success=%s recorded_ids=%s",
+            source_kind,
+            len(function_args.get("items", []) or []),
+            bool(payload.get("success")),
+            len(payload.get("recorded_ids", []) or []) if isinstance(payload.get("recorded_ids"), list) else 0,
+        )
+
+        if payload.get("success"):
+            try:
+                from agent.sparkgraph.maintenance import run_flush_maintenance
+
+                maintenance_result = run_flush_maintenance(
+                    self._sparkgraph_store,
+                    embedding_config=(self._sparkgraph_manager.config.embedding if self._sparkgraph_manager else None),
+                )
+                if isinstance(maintenance_result, dict):
+                    logger.warning(
+                        "SparkGraph maintenance after tool call: scanned=%s deprecated=%s vectors_backfilled=%s",
+                        maintenance_result.get("scanned", 0),
+                        maintenance_result.get("deprecated", 0),
+                        maintenance_result.get("vectors_backfilled", 0),
+                    )
+            except Exception as e:
+                logger.debug("SparkGraph maintenance after tool call failed: %s", e)
+
+        return function_result
+
+    @staticmethod
+    def _build_sparkgraph_item_from_memory_entry(content: str) -> Optional[Dict[str, str]]:
+        """Map a durable memory note to a SparkGraph item when it looks reusable.
+
+        We keep this intentionally conservative so normal workspace notes and
+        reminders do not flood SparkGraph. The primary target is reusable
+        troubleshooting guidance the user explicitly asked Hermes to remember.
+        """
+        text = str(content or "").strip()
+        if not text:
+            return None
+
+        lowered = text.lower()
+        troubleshooting_markers = (
+            "排障经验",
+            "长期可复用",
+            "troubleshooting",
+            "debugging",
+            "无法提交",
+            "卡住",
+            "超时",
+            "失败",
+            "报错",
+            "proxy",
+            "https_proxy",
+            "http_proxy",
+            "all_proxy",
+            "pip ",
+            "git ",
+        )
+        if not any(marker in text or marker in lowered for marker in troubleshooting_markers):
+            return None
+
+        summary = text
+        if summary.startswith("排障经验："):
+            summary = summary[len("排障经验："):].strip()
+
+        return {
+            "summary": summary,
+            "type": "ISSUE",
+            "evidence": text,
+        }
+
+    def _mirror_memory_write_to_sparkgraph(self, function_args: dict, function_result: str) -> Optional[str]:
+        """Mirror durable memory notes into SparkGraph when appropriate."""
+        if not (self._sparkgraph_enabled and self._sparkgraph_store):
+            return None
+        # Background review already has its own SparkGraph paths: either the
+        # model calls sparkgraph_record directly, or the review fallback writes
+        # once after inspecting tool results. Skip the synchronous mirror there
+        # to avoid duplicate nodes/evidence from overlapping pipelines.
+        if getattr(self, "_in_background_review", False):
+            return None
+        if function_args.get("target") != "memory":
+            return None
+        if function_args.get("action") not in {"add", "replace"}:
+            return None
+
+        try:
+            payload = json.loads(function_result)
+        except (TypeError, json.JSONDecodeError):
+            return None
+        if not payload.get("success"):
+            return None
+
+        item = self._build_sparkgraph_item_from_memory_entry(function_args.get("content", ""))
+        if item is None:
+            return None
+        return self._run_sparkgraph_record_tool({"items": [item]}, source_kind="auto")
+
+    @staticmethod
+    def _extract_background_review_memory_items(session_messages: List[Dict]) -> List[Dict[str, str]]:
+        """Extract durable memory writes from background review assistant tool calls.
+
+        When the review model chooses `memory` but skips `sparkgraph_record`, we can
+        mirror stable `target=memory` writes into SparkGraph. Reusable
+        troubleshooting guidance should stay typed as ISSUE so it dedups with
+        the main-flow memory mirror instead of forking into FACT/ISSUE twins.
+        """
+        items: List[Dict[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for msg in session_messages or []:
+            if not isinstance(msg, dict) or msg.get("role") != "assistant":
+                continue
+            for tc in msg.get("tool_calls", []) or []:
+                if not isinstance(tc, dict):
+                    continue
+                fn = tc.get("function", {}) if isinstance(tc.get("function"), dict) else {}
+                if fn.get("name") != "memory":
+                    continue
+                try:
+                    args = json.loads(fn.get("arguments", "{}"))
+                except (TypeError, json.JSONDecodeError):
+                    continue
+                if not isinstance(args, dict):
+                    continue
+                if args.get("target") != "memory":
+                    continue
+                if args.get("action") not in {"add", "replace"}:
+                    continue
+                content = str(args.get("content", "")).strip()
+                if not content:
+                    continue
+                entry = AIAgent._build_sparkgraph_item_from_memory_entry(content)
+                if entry is None:
+                    entry = {
+                        "summary": content,
+                        "type": "FACT",
+                        "evidence": content,
+                    }
+                key = (str(entry["type"]), str(entry["summary"]))
+                if key in seen:
+                    continue
+                seen.add(key)
+                items.append(entry)
+        return items
+
     def _spawn_background_review(
         self,
         messages_snapshot: List[Dict],
@@ -1600,13 +1835,10 @@ class AIAgent:
         """
         import threading
 
-        # Pick the right prompt based on which triggers fired
-        if review_memory and review_skills:
-            prompt = self._COMBINED_REVIEW_PROMPT
-        elif review_memory:
-            prompt = self._MEMORY_REVIEW_PROMPT
-        else:
-            prompt = self._SKILL_REVIEW_PROMPT
+        prompt = self._build_background_review_prompt(
+            review_memory=review_memory,
+            review_skills=review_skills,
+        )
 
         def _run_review():
             import contextlib, os as _os
@@ -1617,6 +1849,9 @@ class AIAgent:
                      contextlib.redirect_stderr(_devnull):
                     review_agent = AIAgent(
                         model=self.model,
+                        base_url=self.base_url,
+                        api_key=self.api_key,
+                        api_mode=self.api_mode,
                         max_iterations=8,
                         quiet_mode=True,
                         platform=self.platform,
@@ -1627,15 +1862,31 @@ class AIAgent:
                     review_agent._user_profile_enabled = self._user_profile_enabled
                     review_agent._memory_nudge_interval = 0
                     review_agent._skill_nudge_interval = 0
+                    review_agent._in_background_review = True
+                    self._enable_background_review_sparkgraph(review_agent)
 
                     review_agent.run_conversation(
                         user_message=prompt,
                         conversation_history=messages_snapshot,
                     )
 
+                attempted_tool_calls = []
+                for msg in getattr(review_agent, "_session_messages", []):
+                    if not isinstance(msg, dict) or msg.get("role") != "assistant":
+                        continue
+                    for tc in msg.get("tool_calls", []) or []:
+                        if not isinstance(tc, dict):
+                            continue
+                        fn = tc.get("function", {}) if isinstance(tc.get("function"), dict) else {}
+                        name = fn.get("name")
+                        if isinstance(name, str) and name:
+                            attempted_tool_calls.append(name)
+
                 # Scan the review agent's messages for successful tool actions
                 # and surface a compact summary to the user.
                 actions = []
+                memory_success = False
+                sparkgraph_success = False
                 for msg in getattr(review_agent, "_session_messages", []):
                     if not isinstance(msg, dict) or msg.get("role") != "tool":
                         continue
@@ -1647,6 +1898,12 @@ class AIAgent:
                         continue
                     message = data.get("message", "")
                     target = data.get("target", "")
+                    if isinstance(data.get("recorded_ids"), list):
+                        count = len(data.get("recorded_ids") or [])
+                        if count > 0:
+                            sparkgraph_success = True
+                            actions.append(f"SparkGraph updated ({count})")
+                        continue
                     if "created" in message.lower():
                         actions.append(message)
                     elif "updated" in message.lower():
@@ -1654,12 +1911,48 @@ class AIAgent:
                     elif "added" in message.lower() or (target and "add" in message.lower()):
                         label = "Memory" if target == "memory" else "User profile" if target == "user" else target
                         actions.append(f"{label} updated")
+                        if target == "memory":
+                            memory_success = True
                     elif "Entry added" in message:
                         label = "Memory" if target == "memory" else "User profile" if target == "user" else target
                         actions.append(f"{label} updated")
+                        if target == "memory":
+                            memory_success = True
                     elif "removed" in message.lower() or "replaced" in message.lower():
                         label = "Memory" if target == "memory" else "User profile" if target == "user" else target
                         actions.append(f"{label} updated")
+                        if target == "memory":
+                            memory_success = True
+
+                if attempted_tool_calls:
+                    logger.warning("background review attempted tool calls: %s", attempted_tool_calls)
+                else:
+                    logger.warning("background review produced no tool calls")
+
+                if review_memory and self._sparkgraph_enabled and memory_success and not sparkgraph_success:
+                    logger.warning(
+                        "background review saved memory without sparkgraph_record; attempted=%s",
+                        attempted_tool_calls,
+                    )
+                    fallback_items = self._extract_background_review_memory_items(
+                        getattr(review_agent, "_session_messages", []),
+                    )
+                    if fallback_items:
+                        fallback_result = self._run_sparkgraph_record_tool(
+                            {"items": fallback_items},
+                            source_kind="review",
+                        )
+                        try:
+                            fallback_payload = json.loads(fallback_result)
+                        except (TypeError, json.JSONDecodeError):
+                            fallback_payload = {}
+                        if fallback_payload.get("success") and fallback_payload.get("recorded_ids"):
+                            actions.append(f"SparkGraph updated ({len(fallback_payload.get('recorded_ids') or [])}, auto)")
+                            sparkgraph_success = True
+                        else:
+                            actions.append("SparkGraph skipped")
+                    else:
+                        actions.append("SparkGraph skipped")
 
                 if actions:
                     summary = " · ".join(dict.fromkeys(actions))
@@ -5175,12 +5468,16 @@ class AIAgent:
         """
         if self._memory_flush_min_turns == 0 and min_turns is None:
             return
-        if "memory" not in self.valid_tool_names or not self._memory_store:
+        memory_available = "memory" in self.valid_tool_names and bool(self._memory_store)
+        sparkgraph_available = bool(self._sparkgraph_enabled and self._sparkgraph_store)
+        if not memory_available and not sparkgraph_available:
             return
         # honcho-only agent mode: skip local MEMORY.md flush
         _hcfg = getattr(self, '_honcho_config', None)
         if _hcfg and _hcfg.peer_memory_mode(_hcfg.ai_peer) == "honcho":
-            return
+            memory_available = False
+            if not sparkgraph_available:
+                return
         effective_min = min_turns if min_turns is not None else self._memory_flush_min_turns
         if self._user_turn_count < effective_min:
             return
@@ -5190,10 +5487,11 @@ class AIAgent:
         if not messages or len(messages) < 3:
             return
 
-        flush_content = (
-            "[System: The session is being compressed. "
-            "Save anything worth remembering — prioritize user preferences, "
-            "corrections, and recurring patterns over task-specific details.]"
+        from agent.sparkgraph.prompting import build_flush_prompt
+
+        flush_content = build_flush_prompt(
+            include_memory=memory_available,
+            include_sparkgraph=sparkgraph_available,
         )
         _sentinel = f"__flush_{id(self)}_{time.monotonic()}"
         flush_msg = {"role": "user", "content": flush_content, "_flush_sentinel": _sentinel}
@@ -5219,14 +5517,26 @@ class AIAgent:
             if self._cached_system_prompt:
                 api_messages = [{"role": "system", "content": self._cached_system_prompt}] + api_messages
 
-            # Make one API call with only the memory tool available
+            # Make one API call with flush-only tools available
             memory_tool_def = None
-            for t in (self.tools or []):
-                if t.get("function", {}).get("name") == "memory":
-                    memory_tool_def = t
-                    break
+            if memory_available:
+                for t in (self.tools or []):
+                    if t.get("function", {}).get("name") == "memory":
+                        memory_tool_def = t
+                        break
 
-            if not memory_tool_def:
+            tool_defs = []
+            if memory_tool_def:
+                tool_defs.append(memory_tool_def)
+
+            if sparkgraph_available:
+                from tools.registry import registry as _tool_registry
+
+                sparkgraph_defs = _tool_registry.get_definitions({"sparkgraph_record"}, quiet=True)
+                if sparkgraph_defs:
+                    tool_defs.extend(sparkgraph_defs)
+
+            if not tool_defs:
                 messages.pop()  # remove flush msg
                 return
 
@@ -5238,7 +5548,7 @@ class AIAgent:
                 response = _call_llm(
                     task="flush_memories",
                     messages=api_messages,
-                    tools=[memory_tool_def],
+                    tools=tool_defs,
                     temperature=0.3,
                     max_tokens=5120,
                     timeout=30.0,
@@ -5250,7 +5560,7 @@ class AIAgent:
             if not _aux_available and self.api_mode == "codex_responses":
                 # No auxiliary client -- use the Codex Responses path directly
                 codex_kwargs = self._build_api_kwargs(api_messages)
-                codex_kwargs["tools"] = self._responses_tools([memory_tool_def])
+                codex_kwargs["tools"] = self._responses_tools(tool_defs)
                 codex_kwargs["temperature"] = 0.3
                 if "max_output_tokens" in codex_kwargs:
                     codex_kwargs["max_output_tokens"] = 5120
@@ -5260,7 +5570,7 @@ class AIAgent:
                 from agent.anthropic_adapter import build_anthropic_kwargs as _build_ant_kwargs
                 ant_kwargs = _build_ant_kwargs(
                     model=self.model, messages=api_messages,
-                    tools=[memory_tool_def], max_tokens=5120,
+                    tools=tool_defs, max_tokens=5120,
                     reasoning_config=None,
                     preserve_dots=self._anthropic_preserve_dots(),
                 )
@@ -5269,7 +5579,7 @@ class AIAgent:
                 api_kwargs = {
                     "model": self.model,
                     "messages": api_messages,
-                    "tools": [memory_tool_def],
+                    "tools": tool_defs,
                     "temperature": 0.3,
                     **self._max_tokens_param(5120),
                 }
@@ -5291,6 +5601,15 @@ class AIAgent:
                 if assistant_message.tool_calls:
                     tool_calls = assistant_message.tool_calls
 
+            if tool_calls:
+                logger.warning(
+                    "flush_memories tool calls: %s",
+                    [tc.function.name for tc in tool_calls if getattr(tc, "function", None)],
+                )
+            else:
+                logger.warning("flush_memories returned no tool calls")
+
+            sparkgraph_changed = False
             for tc in tool_calls:
                 if tc.function.name == "memory":
                     try:
@@ -5304,12 +5623,56 @@ class AIAgent:
                             old_text=args.get("old_text"),
                             store=self._memory_store,
                         )
+                        logger.warning(
+                            "flush_memories memory tool executed: target=%s action=%s success=%s",
+                            flush_target,
+                            args.get("action"),
+                            bool(result.get("success")) if isinstance(result, dict) else True,
+                        )
                         if self._honcho and flush_target == "user" and args.get("action") == "add":
                             self._honcho_save_user_observation(args.get("content", ""))
                         if not self.quiet_mode:
                             print(f"  🧠 Memory flush: saved to {args.get('target', 'memory')}")
                     except Exception as e:
                         logger.debug("Memory flush tool call failed: %s", e)
+                elif tc.function.name == "sparkgraph_record" and sparkgraph_available:
+                    try:
+                        args = json.loads(tc.function.arguments)
+                        from tools.sparkgraph_tool import sparkgraph_record_tool as _sparkgraph_record_tool
+
+                        _sparkgraph_record_tool(
+                            items=args.get("items", []),
+                            store=self._sparkgraph_store,
+                            session_id=self.session_id,
+                            turn_index=self._user_turn_count,
+                            source_kind="flush",
+                            embedding_config=(self._sparkgraph_manager.config.embedding if self._sparkgraph_manager else None),
+                        )
+                        logger.warning(
+                            "flush_memories sparkgraph_record executed: items=%s session_id=%s turn_index=%s",
+                            len(args.get("items", [])),
+                            self.session_id,
+                            self._user_turn_count,
+                        )
+                        sparkgraph_changed = True
+                    except Exception as e:
+                        logger.debug("SparkGraph flush tool call failed: %s", e)
+            if sparkgraph_available and sparkgraph_changed:
+                try:
+                    from agent.sparkgraph.maintenance import run_flush_maintenance
+
+                    maintenance_result = run_flush_maintenance(
+                        self._sparkgraph_store,
+                        embedding_config=(self._sparkgraph_manager.config.embedding if self._sparkgraph_manager else None),
+                    )
+                    logger.warning(
+                        "flush_memories sparkgraph maintenance executed: scanned=%s deprecated=%s vectors_backfilled=%s",
+                        maintenance_result.get("scanned", 0) if isinstance(maintenance_result, dict) else 0,
+                        maintenance_result.get("deprecated", 0) if isinstance(maintenance_result, dict) else 0,
+                        maintenance_result.get("vectors_backfilled", 0) if isinstance(maintenance_result, dict) else 0,
+                    )
+                except Exception as e:
+                    logger.debug("SparkGraph flush maintenance failed: %s", e)
         except Exception as e:
             logger.debug("Memory flush API call failed: %s", e)
         finally:
@@ -5460,7 +5823,10 @@ class AIAgent:
             # Also send user observations to Honcho when active
             if self._honcho and target == "user" and function_args.get("action") == "add":
                 self._honcho_save_user_observation(function_args.get("content", ""))
+            self._mirror_memory_write_to_sparkgraph(function_args, result)
             return result
+        elif function_name == "sparkgraph_record":
+            return self._run_sparkgraph_record_tool(function_args, source_kind="review")
         elif function_name == "clarify":
             from tools.clarify_tool import clarify_tool as _clarify_tool
             return _clarify_tool(
@@ -5813,6 +6179,16 @@ class AIAgent:
                 tool_duration = time.time() - tool_start_time
                 if self.quiet_mode:
                     self._vprint(f"  {_get_cute_tool_message_impl('memory', function_args, tool_duration, result=function_result)}")
+                mirrored_sparkgraph = self._mirror_memory_write_to_sparkgraph(function_args, function_result)
+                if mirrored_sparkgraph and self.quiet_mode:
+                    self._vprint(
+                        f"  {_get_cute_tool_message_impl('sparkgraph_record', {'items': [self._build_sparkgraph_item_from_memory_entry(function_args.get('content', ''))]}, 0.0, result=mirrored_sparkgraph)}"
+                    )
+            elif function_name == "sparkgraph_record":
+                function_result = self._run_sparkgraph_record_tool(function_args, source_kind="review")
+                tool_duration = time.time() - tool_start_time
+                if self.quiet_mode:
+                    self._vprint(f"  {_get_cute_tool_message_impl('sparkgraph_record', function_args, tool_duration, result=function_result)}")
             elif function_name == "clarify":
                 from tools.clarify_tool import clarify_tool as _clarify_tool
                 function_result = _clarify_tool(
@@ -6475,6 +6851,29 @@ class AIAgent:
         except Exception as exc:
             logger.warning("pre_llm_call hook failed: %s", exc)
 
+        _sparkgraph_turn_context = ""
+        if self._sparkgraph_enabled and self._sparkgraph_manager and original_user_message:
+            try:
+                _sparkgraph_turn_context = self._sparkgraph_manager.build_recall_block(
+                    original_user_message,
+                )
+                if _sparkgraph_turn_context:
+                    _recall_lines = [
+                        line.strip() for line in _sparkgraph_turn_context.splitlines()
+                        if line.strip().startswith("- [")
+                    ]
+                    logger.debug(
+                        "SparkGraph recall injected for query=%r hits=%d",
+                        original_user_message,
+                        len(_recall_lines),
+                    )
+                    if self.quiet_mode:
+                        _recall_msg = _format_sparkgraph_recall_message(_sparkgraph_turn_context)
+                        if _recall_msg:
+                            self._print_fn(_recall_msg)
+            except Exception as exc:
+                logger.debug("SparkGraph recall build failed: %s", exc)
+
         # Main conversation loop
         api_call_count = 0
         final_response = None
@@ -6575,6 +6974,8 @@ class AIAgent:
             # Plugin context from pre_llm_call hooks — ephemeral, not cached.
             if _plugin_turn_context:
                 effective_system = (effective_system + "\n\n" + _plugin_turn_context).strip()
+            if _sparkgraph_turn_context:
+                effective_system = (effective_system + "\n\n" + _sparkgraph_turn_context).strip()
             if effective_system:
                 api_messages = [{"role": "system", "content": effective_system}] + api_messages
 

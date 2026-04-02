@@ -188,6 +188,9 @@ def ensure_hermes_home():
         d = home / subdir
         d.mkdir(parents=True, exist_ok=True)
         _secure_dir(d)
+    sparkgraph_dir = home / "sparkgraph"
+    sparkgraph_dir.mkdir(parents=True, exist_ok=True)
+    _secure_dir(sparkgraph_dir)
     _ensure_default_soul_md(home)
 
 
@@ -200,6 +203,24 @@ DEFAULT_CONFIG = {
     "fallback_providers": [],
     "credential_pool_strategies": {},
     "toolsets": ["hermes-cli"],
+    "sparkgraph": {
+        "mode": "flush_integrated",
+        "db_path": "",
+        "recall": {
+            "enabled": True,
+            "max_items": 4,
+            "max_related": 4,
+            "budget_ratio": 0.12,
+            "max_chars": 1800,
+        },
+        "embedding": {
+            "provider": "",
+            "model": "",
+            "base_url": "",
+            "api_key": "",
+            "timeout": 20,
+        },
+    },
     "agent": {
         "max_turns": 90,
         # Tool-use enforcement: injects system prompt guidance that tells the

@@ -77,6 +77,56 @@ def _effective_provider_label() -> str:
     return provider_label(effective)
 
 
+def _sparkgraph_status_section(config: dict, *, probe_enabled: bool = False) -> None:
+    """Render SparkGraph status summary using non-blocking runtime state."""
+    print()
+    print(color("◆ SparkGraph", Colors.CYAN, Colors.BOLD))
+
+    try:
+        from gateway.status import sparkgraph_runtime_status
+        from agent.sparkgraph.config import parse_sparkgraph_config
+        from agent.sparkgraph.flush_eval import load_flush_eval_report
+
+        sg_raw = config.get("sparkgraph", {})
+        sg_cfg = parse_sparkgraph_config(sg_raw, hermes_home=get_hermes_home())
+        runtime = sparkgraph_runtime_status(probe_enabled=probe_enabled) or {}
+        report = load_flush_eval_report(hermes_home=get_hermes_home())
+    except Exception as exc:
+        print(f"  Status:       {check_mark(False)} config error ({exc})")
+        return
+
+    runtime_ok = bool(runtime.get("healthy", True))
+    runtime_degraded = bool(runtime.get("degraded", False))
+    if runtime_degraded:
+        runtime_label = "degraded"
+    else:
+        runtime_label = "ready" if runtime_ok else "unavailable"
+
+    print(f"  Status:       {check_mark(runtime_ok)} {runtime_label}")
+    print(f"  Mode:         {sg_cfg.mode}")
+    print(f"  DB Path:      {sg_cfg.db_path}")
+    print(
+        f"  Recall:       {check_mark(sg_cfg.recall.enabled)} "
+        f"{'enabled' if sg_cfg.recall.enabled else 'disabled'} "
+        f"(items={sg_cfg.recall.max_items}, related={sg_cfg.recall.max_related}, chars={sg_cfg.recall.max_chars})"
+    )
+
+    embedding = runtime.get("embedding", {})
+    emb_status = "disabled"
+    if embedding.get("enabled"):
+        emb_status = "degraded" if embedding.get("degraded") else "configured"
+    print(
+        f"  Embedding:    {check_mark(bool(embedding.get('healthy', False)) or not embedding.get('enabled'))} "
+        f"{emb_status}"
+    )
+    if isinstance(report, dict):
+        summary = report.get("summary", {})
+        passed = summary.get("passed", "?")
+        total = summary.get("total", "?")
+        generated_at = _format_iso_timestamp(report.get("generated_at"))
+        print(f"  Last Eval:    {passed}/{total} at {generated_at}")
+
+
 def show_status(args):
     """Show status of all Hermes Agent components."""
     show_all = getattr(args, 'all', False)
@@ -105,6 +155,8 @@ def show_status(args):
 
     print(f"  Model:        {_configured_model_label(config)}")
     print(f"  Provider:     {_effective_provider_label()}")
+
+    _sparkgraph_status_section(config, probe_enabled=deep)
     
     # =========================================================================
     # API Keys

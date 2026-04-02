@@ -20,6 +20,10 @@ from pathlib import Path
 from hermes_constants import get_hermes_home
 from typing import Any, Optional
 
+from agent.sparkgraph.config import parse_sparkgraph_config
+from agent.sparkgraph.runtime import build_runtime_snapshot
+from hermes_cli.config import load_config
+
 _GATEWAY_KIND = "hermes-gateway"
 _RUNTIME_STATUS_FILE = "gateway_state.json"
 _LOCKS_DIRNAME = "gateway-locks"
@@ -224,6 +228,30 @@ def write_runtime_status(
 def read_runtime_status() -> Optional[dict[str, Any]]:
     """Read the persisted gateway runtime health/status information."""
     return _read_json_file(_get_runtime_status_path())
+
+
+def sparkgraph_runtime_status(*, probe_enabled: bool = False) -> Optional[dict[str, Any]]:
+    """Return SparkGraph runtime health based on current profile config.
+
+    This status path is intentionally non-blocking: it summarizes configuration
+    state without performing live network probes.
+    """
+    try:
+        raw = load_config().get("sparkgraph", {})
+        config = parse_sparkgraph_config(raw, hermes_home=get_hermes_home())
+        snapshot = build_runtime_snapshot(config, probe_enabled=probe_enabled)
+        return {
+            "healthy": snapshot.healthy,
+            "degraded": snapshot.degraded,
+            "embedding": {
+                "enabled": snapshot.embedding.enabled,
+                "healthy": snapshot.embedding.healthy,
+                "degraded": snapshot.embedding.degraded,
+                "reason": snapshot.embedding.reason,
+            },
+        }
+    except Exception:
+        return None
 
 
 def remove_pid_file() -> None:

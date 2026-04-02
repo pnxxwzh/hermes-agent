@@ -3900,12 +3900,12 @@ For more help on a command:
         "setup",
         help="Interactive setup wizard",
         description="Configure Hermes Agent with an interactive wizard. "
-                    "Run a specific section: hermes setup model|terminal|gateway|tools|agent"
+                    "Run a specific section: hermes setup model|terminal|gateway|tools|sparkgraph|agent"
     )
     setup_parser.add_argument(
         "section",
         nargs="?",
-        choices=["model", "terminal", "gateway", "tools", "agent"],
+        choices=["model", "terminal", "gateway", "tools", "sparkgraph", "agent"],
         default=None,
         help="Run a specific setup section instead of the full wizard"
     )
@@ -4148,6 +4148,11 @@ For more help on a command:
         "--fix",
         action="store_true",
         help="Attempt to fix issues automatically"
+    )
+    doctor_parser.add_argument(
+        "--probe",
+        action="store_true",
+        help="Run live SparkGraph runtime probes where supported"
     )
     doctor_parser.set_defaults(func=cmd_doctor)
     

@@ -6,7 +6,7 @@
 openai
 python-dotenv
 fire
-httpx
+httpx[socks]
 rich
 tenacity
 prompt_toolkit
