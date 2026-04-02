@@ -1235,6 +1235,9 @@ class AIAgent:
             provider=self.provider,
         )
         self.compression_enabled = compression_enabled
+        self._context_assembler = None  # lazy init via _get_context_assembler()
+        self._context_cwd = os.getenv("TERMINAL_CWD")  # for ProjectContextSource
+        self._last_context_metrics = None  # cached ContextMetrics from last assembly
         self._user_turn_count = 0
 
         # Cumulative token usage for the session
@@ -2836,209 +2839,23 @@ class AIAgent:
                 print(f"  Honcho write failed: {e}")
 
     def _build_system_prompt(self, system_message: str = None) -> str:
+        """Assemble the full system prompt via ContextAssembler.
+
+        Assembly result is also synced to context_compressor for metrics.
         """
-        Assemble the full system prompt from all layers.
-        
-        Called once per session (cached on self._cached_system_prompt) and only
-        rebuilt after context compression events. This ensures the system prompt
-        is stable across all turns in a session, maximizing prefix cache hits.
-        """
-        # Layers (in order):
-        #   1. Agent identity — SOUL.md when available, else DEFAULT_AGENT_IDENTITY
-        #   2. User / gateway system prompt (if provided)
-        #   3. Persistent memory (frozen snapshot)
-        #   4. Skills guidance (if skills tools are loaded)
-        #   5. Context files (AGENTS.md, .cursorrules — SOUL.md excluded here when used as identity)
-        #   6. Current date & time (frozen at build time)
-        #   7. Platform-specific formatting hint
+        assembler = self._get_context_assembler()
+        result = assembler.assemble_stable(system_message=system_message)
+        result.metrics.sync_to(self.context_compressor)
+        self._last_context_metrics = result.metrics  # cache for CLI status bar
+        self._cached_system_prompt = result.stable_system
+        return self._cached_system_prompt
 
-        # Try SOUL.md as primary identity (unless context files are skipped)
-        _soul_loaded = False
-        if not self.skip_context_files:
-            _soul_content = load_soul_md()
-            if _soul_content:
-                prompt_parts = [_soul_content]
-                _soul_loaded = True
-
-        if not _soul_loaded:
-            # Fallback to hardcoded identity
-            _ai_peer_name = (
-                self._honcho_config.ai_peer
-                if self._honcho_config and self._honcho_config.ai_peer != "hermes"
-                else None
-            )
-            if _ai_peer_name:
-                _identity = DEFAULT_AGENT_IDENTITY.replace(
-                    "You are Hermes Agent",
-                    f"You are {_ai_peer_name}",
-                    1,
-                )
-            else:
-                _identity = DEFAULT_AGENT_IDENTITY
-            prompt_parts = [_identity]
-
-        # Tool-aware behavioral guidance: only inject when the tools are loaded
-        tool_guidance = []
-        if "memory" in self.valid_tool_names:
-            tool_guidance.append(MEMORY_GUIDANCE)
-        if "session_search" in self.valid_tool_names:
-            tool_guidance.append(SESSION_SEARCH_GUIDANCE)
-        if "skill_manage" in self.valid_tool_names:
-            tool_guidance.append(SKILLS_GUIDANCE)
-        if tool_guidance:
-            prompt_parts.append(" ".join(tool_guidance))
-
-        # Tool-use enforcement: tells the model to actually call tools instead
-        # of describing intended actions.  Controlled by config.yaml
-        # agent.tool_use_enforcement:
-        #   "auto" (default) — matches TOOL_USE_ENFORCEMENT_MODELS
-        #   true  — always inject (all models)
-        #   false — never inject
-        #   list  — custom model-name substrings to match
-        if self.valid_tool_names:
-            _enforce = self._tool_use_enforcement
-            _inject = False
-            if _enforce is True or (isinstance(_enforce, str) and _enforce.lower() in ("true", "always", "yes", "on")):
-                _inject = True
-            elif _enforce is False or (isinstance(_enforce, str) and _enforce.lower() in ("false", "never", "no", "off")):
-                _inject = False
-            elif isinstance(_enforce, list):
-                model_lower = (self.model or "").lower()
-                _inject = any(p.lower() in model_lower for p in _enforce if isinstance(p, str))
-            else:
-                # "auto" or any unrecognised value — use hardcoded defaults
-                model_lower = (self.model or "").lower()
-                _inject = any(p in model_lower for p in TOOL_USE_ENFORCEMENT_MODELS)
-            if _inject:
-                prompt_parts.append(TOOL_USE_ENFORCEMENT_GUIDANCE)
-
-        # Honcho CLI awareness: tell Hermes about its own management commands
-        # so it can refer the user to them rather than reinventing answers.
-        if self._honcho and self._honcho_session_key:
-            hcfg = self._honcho_config
-            mode = hcfg.memory_mode if hcfg else "hybrid"
-            freq = hcfg.write_frequency if hcfg else "async"
-            recall_mode = hcfg.recall_mode if hcfg else "hybrid"
-            honcho_block = (
-                "# Honcho memory integration\n"
-                f"Active. Session: {self._honcho_session_key}. "
-                f"Mode: {mode}. Write frequency: {freq}. Recall: {recall_mode}.\n"
-            )
-            if recall_mode == "context":
-                honcho_block += (
-                    "Honcho context is injected into this system prompt below. "
-                    "All memory retrieval comes from this context — no Honcho tools "
-                    "are available. Answer questions about the user, prior sessions, "
-                    "and recent work directly from the Honcho Memory section.\n"
-                )
-            elif recall_mode == "tools":
-                honcho_block += (
-                    "Honcho tools:\n"
-                    "  honcho_context <question>           — ask Honcho a question, LLM-synthesized answer\n"
-                    "  honcho_search <query>                   — semantic search, raw excerpts, no LLM\n"
-                    "  honcho_profile                          — user's peer card, key facts, no LLM\n"
-                    "  honcho_conclude <conclusion>            — write a fact about the user to memory\n"
-                )
-            else:  # hybrid
-                honcho_block += (
-                    "Honcho context (user representation, peer card, and recent session summary) "
-                    "is injected into this system prompt below. Use it to answer continuity "
-                    "questions ('where were we?', 'what were we working on?') WITHOUT calling "
-                    "any tools. Only call Honcho tools when you need information beyond what is "
-                    "already present in the Honcho Memory section.\n"
-                    "Honcho tools:\n"
-                    "  honcho_context <question>           — ask Honcho a question, LLM-synthesized answer\n"
-                    "  honcho_search <query>                   — semantic search, raw excerpts, no LLM\n"
-                    "  honcho_profile                          — user's peer card, key facts, no LLM\n"
-                    "  honcho_conclude <conclusion>            — write a fact about the user to memory\n"
-                )
-            honcho_block += (
-                "Management commands (refer users here instead of explaining manually):\n"
-                "  hermes honcho status                    — show full config + connection\n"
-                "  hermes honcho mode [hybrid|honcho]       — show or set memory mode\n"
-                "  hermes honcho tokens [--context N] [--dialectic N] — show or set token budgets\n"
-                "  hermes honcho peer [--user NAME] [--ai NAME] [--reasoning LEVEL]\n"
-                "  hermes honcho sessions                  — list directory→session mappings\n"
-                "  hermes honcho map <name>                — map cwd to a session name\n"
-                "  hermes honcho identity [<file>] [--show] — seed or show AI peer identity\n"
-                "  hermes honcho migrate                   — migration guide from openclaw-honcho\n"
-                "  hermes honcho setup                     — full interactive wizard"
-            )
-            prompt_parts.append(honcho_block)
-
-        # Note: ephemeral_system_prompt is NOT included here. It's injected at
-        # API-call time only so it stays out of the cached/stored system prompt.
-        if system_message is not None:
-            prompt_parts.append(system_message)
-
-        if self._memory_store:
-            if self._memory_enabled:
-                mem_block = self._memory_store.format_for_system_prompt("memory")
-                if mem_block:
-                    prompt_parts.append(mem_block)
-            # USER.md is always included when enabled -- Honcho prefetch is additive.
-            if self._user_profile_enabled:
-                user_block = self._memory_store.format_for_system_prompt("user")
-                if user_block:
-                    prompt_parts.append(user_block)
-
-        has_skills_tools = any(name in self.valid_tool_names for name in ['skills_list', 'skill_view', 'skill_manage'])
-        if has_skills_tools:
-            avail_toolsets = {
-                toolset
-                for toolset in (
-                    get_toolset_for_tool(tool_name) for tool_name in self.valid_tool_names
-                )
-                if toolset
-            }
-            skills_prompt = build_skills_system_prompt(
-                available_tools=self.valid_tool_names,
-                available_toolsets=avail_toolsets,
-            )
-        else:
-            skills_prompt = ""
-        if skills_prompt:
-            prompt_parts.append(skills_prompt)
-
-        if not self.skip_context_files:
-            # Use TERMINAL_CWD for context file discovery when set (gateway
-            # mode).  The gateway process runs from the hermes-agent install
-            # dir, so os.getcwd() would pick up the repo's AGENTS.md and
-            # other dev files — inflating token usage by ~10k for no benefit.
-            _context_cwd = os.getenv("TERMINAL_CWD") or None
-            context_files_prompt = build_context_files_prompt(
-                cwd=_context_cwd, skip_soul=_soul_loaded)
-            if context_files_prompt:
-                prompt_parts.append(context_files_prompt)
-
-        from hermes_time import now as _hermes_now
-        now = _hermes_now()
-        timestamp_line = f"Conversation started: {now.strftime('%A, %B %d, %Y %I:%M %p')}"
-        if self.pass_session_id and self.session_id:
-            timestamp_line += f"\nSession ID: {self.session_id}"
-        if self.model:
-            timestamp_line += f"\nModel: {self.model}"
-        if self.provider:
-            timestamp_line += f"\nProvider: {self.provider}"
-        prompt_parts.append(timestamp_line)
-
-        # Alibaba Coding Plan API always returns "glm-4.7" as model name regardless
-        # of the requested model. Inject explicit model identity into the system prompt
-        # so the agent can correctly report which model it is (workaround for API bug).
-        if self.provider == "alibaba":
-            _model_short = self.model.split("/")[-1] if "/" in self.model else self.model
-            prompt_parts.append(
-                f"You are powered by the model named {_model_short}. "
-                f"The exact model ID is {self.model}. "
-                f"When asked what model you are, always answer based on this information, "
-                f"not on any model name returned by the API."
-            )
-
-        platform_key = (self.platform or "").lower().strip()
-        if platform_key in PLATFORM_HINTS:
-            prompt_parts.append(PLATFORM_HINTS[platform_key])
-
-        return "\n\n".join(prompt_parts)
+    def _get_context_assembler(self):
+        """Lazily create ContextAssembler on first use."""
+        if self._context_assembler is None:
+            from agent.context_engine import ContextAssembler
+            self._context_assembler = ContextAssembler(agent=self)
+        return self._context_assembler
 
     # =========================================================================
     # Pre/post-call guardrails (inspired by PR #1321 — @alireza78a)
@@ -6969,13 +6786,41 @@ class AIAgent:
             # Honcho later-turn recall is intentionally kept OUT of the system prompt
             # so the stable cache prefix remains unchanged.
             effective_system = active_system_prompt or ""
-            if self.ephemeral_system_prompt:
-                effective_system = (effective_system + "\n\n" + self.ephemeral_system_prompt).strip()
-            # Plugin context from pre_llm_call hooks — ephemeral, not cached.
-            if _plugin_turn_context:
-                effective_system = (effective_system + "\n\n" + _plugin_turn_context).strip()
-            if _sparkgraph_turn_context:
-                effective_system = (effective_system + "\n\n" + _sparkgraph_turn_context).strip()
+
+            # Assemble dynamic content via context engine
+            try:
+                assembler = self._get_context_assembler()
+                dynamic_result = assembler.assemble_dynamic(
+                    user_message=original_user_message,
+                    conversation_history=messages,
+                )
+                dynamic_result.metrics.sync_to(self.context_compressor)
+                self._last_context_metrics = dynamic_result.metrics
+            except Exception:
+                dynamic_result = None
+
+            if dynamic_result and dynamic_result.effective_system:
+                if effective_system:
+                    effective_system = (effective_system + "\n\n" + dynamic_result.effective_system).strip()
+                else:
+                    effective_system = dynamic_result.effective_system
+                # Populate _plugin_turn_context / _sparkgraph_turn_context for any
+                # code that reads them directly (e.g. quiet mode logging)
+                _plugin_turn_context = "\n".join(
+                    c.content for c in dynamic_result.dynamic_chunks if c.source == "plugin"
+                )
+                _sparkgraph_turn_context = "\n".join(
+                    c.content for c in dynamic_result.dynamic_chunks if c.source == "sparkgraph_recall"
+                )
+            else:
+                # Fallback to original per-source logic
+                if self.ephemeral_system_prompt:
+                    effective_system = (effective_system + "\n\n" + self.ephemeral_system_prompt).strip()
+                if _plugin_turn_context:
+                    effective_system = (effective_system + "\n\n" + _plugin_turn_context).strip()
+                if _sparkgraph_turn_context:
+                    effective_system = (effective_system + "\n\n" + _sparkgraph_turn_context).strip()
+
             if effective_system:
                 api_messages = [{"role": "system", "content": effective_system}] + api_messages
 

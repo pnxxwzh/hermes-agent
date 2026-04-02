@@ -28,6 +28,45 @@ from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 
+
+# ---------------------------------------------------------------------------
+# Source color and label mapping for context breakdown display
+# ---------------------------------------------------------------------------
+_SOURCE_COLORS = {
+    "stable": "cyan",
+    "memory": "green",
+    "user_profile": "blue",
+    "skills": "yellow",
+    "project_context": "orange",
+    "sparkgraph_recall": "purple",
+    "ephemeral": "bright_black",
+    "plugin": "gray",
+    "honcho_static": "magenta",
+    "honcho_turn": "magenta",
+    "tool_guidance": "bright_cyan",
+    "tool_use_enforcement": "bright_cyan",
+    "identity": "bright_blue",
+    "system_message": "bright_green",
+    "time_platform": "bright_black",
+}
+_SOURCE_LABELS = {
+    "stable": "stable",
+    "memory": "memory",
+    "user_profile": "user",
+    "skills": "skills",
+    "project_context": "project",
+    "sparkgraph_recall": "SG",
+    "ephemeral": "ephemeral",
+    "plugin": "plugin",
+    "honcho_static": "honcho",
+    "honcho_turn": "honcho_turn",
+    "tool_guidance": "tool_guidance",
+    "tool_use_enforcement": "tool_enforce",
+    "identity": "identity",
+    "system_message": "system",
+    "time_platform": "time",
+}
+
 logger = logging.getLogger(__name__)
 
 # Suppress startup messages for clean CLI experience
@@ -1282,6 +1321,7 @@ class HermesCLI:
 
         # Status bar visibility (toggled via /statusbar)
         self._status_bar_visible = True
+        self._show_context_breakdown = True  # Phase 2: enabled by default
 
         # Background task tracking: {task_id: threading.Thread}
         self._background_tasks: Dict[str, threading.Thread] = {}
@@ -1498,10 +1538,18 @@ class HermesCLI:
                         (bar_style, percent_label),
                         ("class:status-bar-dim", " │ "),
                         ("class:status-bar-dim", duration_label),
-                        ("class:status-bar", " "),
                     ]
 
-            total_width = sum(self._status_bar_display_width(text) for _, text in frags)
+                    # Phase 2: append source breakdown bar when enabled and terminal is wide
+                    if self._show_context_breakdown and width >= 90:
+                        source_metrics = self._get_current_context_metrics()
+                        source_bar_width = min(width - 52, 30)
+                        source_bar = self._render_source_bar(source_metrics, width=source_bar_width)
+                        if source_bar:
+                            frags.append(("class:status-bar-dim", " │ "))
+                            frags.append((bar_style, source_bar))
+
+                    frags.append(("class:status-bar", " "))
             if total_width > width:
                 plain_text = "".join(text for _, text in frags)
                 trimmed = self._trim_status_bar_text(plain_text, width)
@@ -1509,6 +1557,73 @@ class HermesCLI:
             return frags
         except Exception:
             return [("class:status-bar", f" {self._build_status_bar_text()} ")]
+
+    # -------------------------------------------------------------------------
+    # Source breakdown rendering (Phase 1: internal methods only)
+    # -------------------------------------------------------------------------
+
+    def _render_context_breakdown(self, metrics) -> str:
+        """Render per-source token breakdown for debug/analysis display.
+
+        Returns empty string if metrics unavailable.
+        """
+        if not metrics or not hasattr(metrics, "by_source") or not metrics.by_source:
+            return ""
+
+        lines = []
+        for sm in metrics.by_source:
+            color = _SOURCE_COLORS.get(sm.source, "white")
+            label = _SOURCE_LABELS.get(sm.source, sm.source)
+            lines.append(f"  [{color}]{label}[/{color}]: {sm.rough_tokens:,} tok ({sm.char_count:,} char)")
+
+        return "\n".join(lines)
+
+    def _get_current_context_metrics(self):
+        """Read cached ContextMetrics from the agent for display."""
+        agent = getattr(self, "agent", None)
+        if not agent:
+            return None
+        return getattr(agent, "_last_context_metrics", None)
+
+    def _render_source_bar(self, metrics, width: int = 20) -> str:
+        if not metrics or not hasattr(metrics, "by_source"):
+            return ""
+        if not metrics.by_source or metrics.total_estimated_tokens == 0:
+            return ""
+
+        # Build segments
+        segments = []
+        for sm in metrics.by_source:
+            proportion = sm.rough_tokens / metrics.total_estimated_tokens
+            color = _SOURCE_COLORS.get(sm.source, "white")
+            segments.append({
+                "source": _SOURCE_LABELS.get(sm.source, sm.source),
+                "tokens": sm.rough_tokens,
+                "proportion": proportion,
+                "color": color,
+            })
+
+        # Sort by proportion descending, merge < 5% into "other"
+        segments.sort(key=lambda x: x["proportion"], reverse=True)
+        primary = [s for s in segments if s["proportion"] >= 0.05]
+        small = segments[len(primary):]
+        if small:
+            total_small = sum(s["proportion"] for s in small)
+            primary.append({
+                "source": "other",
+                "tokens": sum(s["tokens"] for s in small),
+                "proportion": total_small,
+                "color": "bright_black",
+            })
+
+        # Render bar
+        bar_parts = []
+        for seg in primary:
+            filled = int(seg["proportion"] * width)
+            bar_parts.append(f"[{seg['color']}]{'█' * filled}[/]")
+
+        bar_str = "".join(bar_parts)
+        return f"[{bar_str}] {metrics.total_estimated_tokens:,} tok"
 
     def _normalize_model_for_provider(self, resolved_provider: str) -> bool:
         """Normalize provider-specific model IDs and routing."""
