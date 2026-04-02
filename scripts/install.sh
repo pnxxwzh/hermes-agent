@@ -6,7 +6,7 @@
 # Uses uv for fast Python provisioning and package management.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/pnxxwzh/hermes-agent/mem-research/scripts/install.sh | bash
 #
 # Or with options:
 #   curl -fsSL ... | bash -s -- --no-venv --skip-setup
@@ -26,8 +26,8 @@ NC='\033[0m' # No Color
 BOLD='\033[1m'
 
 # Configuration
-REPO_URL_SSH="git@github.com:NousResearch/hermes-agent.git"
-REPO_URL_HTTPS="https://github.com/NousResearch/hermes-agent.git"
+REPO_URL_SSH="git@github.com:pnxxwzh/hermes-agent.git"
+REPO_URL_HTTPS="https://github.com/pnxxwzh/hermes-agent.git"
 HERMES_HOME="$HOME/.hermes"
 INSTALL_DIR="${HERMES_INSTALL_DIR:-$HERMES_HOME/hermes-agent}"
 PYTHON_VERSION="3.11"
@@ -36,7 +36,7 @@ NODE_VERSION="22"
 # Options
 USE_VENV=true
 RUN_SETUP=true
-BRANCH="main"
+BRANCH="mem-research"
 
 # Detect non-interactive mode (e.g. curl | bash)
 # When stdin is not a terminal, read -p will fail with EOF,
@@ -74,7 +74,7 @@ while [[ $# -gt 0 ]]; do
             echo "Options:"
             echo "  --no-venv      Don't create virtual environment"
             echo "  --skip-setup   Skip interactive setup wizard"
-            echo "  --branch NAME  Git branch to install (default: main)"
+            echo "  --branch NAME  Git branch to install (default: mem-research)"
             echo "  --dir PATH     Installation directory (default: ~/.hermes/hermes-agent)"
             echo "  -h, --help     Show this help"
             exit 0
@@ -140,7 +140,7 @@ detect_os() {
             OS="windows"
             DISTRO="windows"
             log_error "Windows detected. Please use the PowerShell installer:"
-            log_info "  irm https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.ps1 | iex"
+            log_info "  irm https://raw.githubusercontent.com/pnxxwzh/hermes-agent/mem-research/scripts/install.ps1 | iex"
             exit 1
             ;;
         *)
