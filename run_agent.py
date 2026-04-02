@@ -1683,24 +1683,6 @@ class AIAgent:
             len(payload.get("recorded_ids", []) or []) if isinstance(payload.get("recorded_ids"), list) else 0,
         )
 
-        if payload.get("success"):
-            try:
-                from agent.sparkgraph.maintenance import run_flush_maintenance
-
-                maintenance_result = run_flush_maintenance(
-                    self._sparkgraph_store,
-                    embedding_config=(self._sparkgraph_manager.config.embedding if self._sparkgraph_manager else None),
-                )
-                if isinstance(maintenance_result, dict):
-                    logger.warning(
-                        "SparkGraph maintenance after tool call: scanned=%s deprecated=%s vectors_backfilled=%s",
-                        maintenance_result.get("scanned", 0),
-                        maintenance_result.get("deprecated", 0),
-                        maintenance_result.get("vectors_backfilled", 0),
-                    )
-            except Exception as e:
-                logger.debug("SparkGraph maintenance after tool call failed: %s", e)
-
         return function_result
 
     @staticmethod
@@ -1953,6 +1935,24 @@ class AIAgent:
                             actions.append("SparkGraph skipped")
                     else:
                         actions.append("SparkGraph skipped")
+
+                if self._sparkgraph_enabled and self._sparkgraph_store:
+                    try:
+                        from agent.sparkgraph.maintenance import run_flush_maintenance
+
+                        maintenance_result = run_flush_maintenance(
+                            self._sparkgraph_store,
+                            embedding_config=(self._sparkgraph_manager.config.embedding if self._sparkgraph_manager else None),
+                        )
+                        if isinstance(maintenance_result, dict):
+                            logger.warning(
+                                "background review sparkgraph maintenance executed: scanned=%s deprecated=%s vectors_backfilled=%s",
+                                maintenance_result.get("scanned", 0),
+                                maintenance_result.get("deprecated", 0),
+                                maintenance_result.get("vectors_backfilled", 0),
+                            )
+                    except Exception as e:
+                        logger.debug("Background review SparkGraph maintenance failed: %s", e)
 
                 if actions:
                     summary = " · ".join(dict.fromkeys(actions))

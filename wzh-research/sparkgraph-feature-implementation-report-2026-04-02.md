@@ -103,6 +103,7 @@ Hermes 原有的长期记忆主要依赖 `MEMORY.md` / `USER.md`。这种方式�
 3. recall 时结合向量相似度与 FTS 结果混合召回
 4. embedding runtime 不可用时自动退回 FTS-only
 5. 旧节点支持向量回填
+6. 语义召回已从“最近少量向量节点”提升为覆盖全体 active 向量候选，再保留 top-k
 
 实际价值：
 
@@ -126,12 +127,16 @@ Hermes 原有的长期记忆主要依赖 `MEMORY.md` / `USER.md`。这种方式�
    - `scanned`
    - `deprecated`
    - `vectors_backfilled`
+4. maintenance 已从同步写入主链移到 Hermes 原生整理时机
+   - background review 尾部
+   - `flush_memories()` 尾部
 
 真实业务已验证：
 
 1. 维护逻辑不只在单测中生效
 2. 真实 Hermes 会话写入能触发 maintenance
 3. probe 节点在真实库里可被降级为 `deprecated`
+4. 主流程写入已不再同步承担 maintenance 成本
 
 ### 3.6 新写入的近重复去重
 
@@ -258,6 +263,13 @@ v1 只做了最小范围：
 -> CLI 显示 ✨ recall
 ```
 
+补充说明：
+
+1. 只有最终真的生成了非空 recall block，才会更新：
+   - `last_recalled_at`
+   - `recall_hits`
+2. 如果 `max_chars` 等预算导致最终 block 为空，不再记录假 recall hit
+
 ## 6. 已完成的真实业务验证
 
 本轮不仅跑了测试，也做了多轮真实 `./hermes` 对话验证。
@@ -272,6 +284,8 @@ v1 只做了最小范围：
 6. candidate/active 生命周期治理能在真实业务触发
 7. Elasticsearch 两条相关知识自动建 `RELATED_TO`
 8. 相关边会帮助泛化问法下的联合回答
+9. recall hit 只在非空 block 真正注入时记账
+10. maintenance 已移动到 background review / flush 的原生整理时机
 
 ## 7. 测试覆盖
 
@@ -336,6 +350,7 @@ v1 只做了最小范围：
 2. 边信号进入 active support/ranking
 3. merge 后边迁移
 4. 更多 relation 类型进入 review/flush
+5. background review maintenance 目前仍是“SparkGraph enabled 时每轮都会跑”，后续可继续加 dirty-flag / write-gating，避免无变更 review 扫描整图
 
 对应记录见：
 

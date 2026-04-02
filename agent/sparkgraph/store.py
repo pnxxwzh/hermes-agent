@@ -352,13 +352,12 @@ class SparkGraphStore:
         payload["embedding"] = unpack_embedding(payload["embedding"], int(payload["dims"]))
         return payload
 
-    def list_vector_nodes(self, *, status: str | None = None, limit: int = 64) -> list[dict[str, Any]]:
+    def list_vector_nodes(self, *, status: str | None = None, limit: int | None = None) -> list[dict[str, Any]]:
         where_parts: list[str] = []
         params: list[Any] = []
         if status:
             where_parts.append("n.status = ?")
             params.append(status)
-        params.append(max(1, int(limit)))
 
         sql = (
             f"SELECT n.*, v.content_hash, v.embedding, v.dims, v.updated_at AS vector_updated_at "
@@ -367,7 +366,10 @@ class SparkGraphStore:
         )
         if where_parts:
             sql += " WHERE " + " AND ".join(where_parts)
-        sql += " ORDER BY n.updated_at DESC LIMIT ?"
+        sql += " ORDER BY n.updated_at DESC"
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(max(1, int(limit)))
 
         rows = self._conn.execute(sql, tuple(params)).fetchall()
         items: list[dict[str, Any]] = []

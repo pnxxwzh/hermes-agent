@@ -11,7 +11,7 @@ from dataclasses import dataclass
 
 from agent.sparkgraph.config import SparkGraphConfig, parse_sparkgraph_config
 from agent.sparkgraph.db import ensure_db_parent
-from agent.sparkgraph.formatter import format_recall_block
+from agent.sparkgraph.formatter import build_recall_payload
 from agent.sparkgraph.recaller import RecallConfig, recall_nodes
 from agent.sparkgraph.runtime import SparkGraphRuntimeSnapshot, build_runtime_snapshot
 from agent.sparkgraph.store import SparkGraphStore
@@ -56,15 +56,16 @@ class SparkGraphManager:
             ),
             embedding_config=self.config.embedding,
         )
-        if nodes:
-            try:
-                store.mark_recalled([str(node["id"]) for node in nodes if node.get("id")])
-            except Exception:
-                pass
-        return format_recall_block(
+        block, included_ids = build_recall_payload(
             nodes,
             max_chars=max_chars if max_chars is not None else recall_cfg.max_chars,
         )
+        if block and included_ids:
+            try:
+                store.mark_recalled(included_ids)
+            except Exception:
+                pass
+        return block
 
     def runtime_snapshot(self, *, probe_fn=None, probe_enabled: bool = True) -> SparkGraphRuntimeSnapshot:
         return build_runtime_snapshot(self.config, probe_fn=probe_fn, probe_enabled=probe_enabled)

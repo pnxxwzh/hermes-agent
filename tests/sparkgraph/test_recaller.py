@@ -166,6 +166,38 @@ def test_manager_recall_marks_recalled_nodes(tmp_path):
     assert '"recall_hits": 1' in node["meta"]
 
 
+def test_manager_recall_does_not_mark_nodes_when_block_is_empty(tmp_path):
+    from agent.sparkgraph.manager import SparkGraphManager
+
+    manager = SparkGraphManager.from_raw_config(
+        {
+            "mode": "flush_integrated",
+            "recall": {
+                "enabled": True,
+                "max_items": 4,
+                "max_related": 4,
+                "budget_ratio": 0.12,
+                "max_chars": 10,
+            },
+        },
+        hermes_home=tmp_path,
+    )
+    store = manager.ensure_store()
+    node_id = _insert_active_node(
+        store,
+        node_type=NodeType.FACT,
+        summary="socksio may be required for SOCKS proxy support",
+        canonical_key="fact:socksio-required",
+    )
+
+    block = manager.build_recall_block("socksio proxy support")
+    node = store.get_node(node_id)
+
+    assert block == ""
+    assert int(node["last_recalled_at"]) == 0
+    assert '"recall_hits":' not in node["meta"]
+
+
 def test_recall_nodes_excludes_deprecated_nodes(tmp_path):
     store = SparkGraphStore(tmp_path / "sparkgraph" / "default.db")
     active_id = _insert_active_node(
@@ -216,6 +248,55 @@ def test_recall_nodes_excludes_low_stability_active_nodes(tmp_path):
     node_ids = {node["id"] for node in nodes}
     assert strong_id in node_ids
     assert weak_id not in node_ids
+
+
+def test_recall_nodes_vector_search_can_hit_older_relevant_nodes(tmp_path, monkeypatch):
+    store = SparkGraphStore(tmp_path / "sparkgraph" / "default.db")
+    target_id = _insert_active_node(
+        store,
+        node_type=NodeType.ISSUE,
+        summary="Elasticsearch 查询变慢时，先检查 keyword 和 text 字段映射是否错误",
+        canonical_key="issue:es-field-mapping",
+    )
+    store.upsert_vector(
+        node_id=target_id,
+        content_hash="target",
+        embedding=[1.0, 0.0, 0.0],
+    )
+    store.conn.execute(
+        "UPDATE sg_nodes SET updated_at = ? WHERE id = ?",
+        (1, target_id),
+    )
+    store.conn.commit()
+
+    for idx in range(30):
+        node_id = _insert_active_node(
+            store,
+            node_type=NodeType.FACT,
+            summary=f"noise node {idx}",
+            canonical_key=f"fact:noise-{idx}",
+        )
+        store.upsert_vector(
+            node_id=node_id,
+            content_hash=f"noise-{idx}",
+            embedding=[0.0, 1.0, 0.0],
+        )
+
+    monkeypatch.setattr("agent.sparkgraph.recaller.create_embedding", lambda *a, **kw: [1.0, 0.0, 0.0])
+
+    nodes = recall_nodes(
+        store,
+        query="field mapping problem",
+        config=RecallConfig(search_limit=4, related_limit=0, max_nodes=4, vector_limit=4),
+        embedding_config=SparkGraphEmbeddingConfig(
+            provider="openai-compatible",
+            model="fake-embed",
+            base_url="http://localhost:8000",
+            timeout=10,
+        ),
+    )
+    node_ids = {node["id"] for node in nodes}
+    assert target_id in node_ids
 
 
 def test_manager_empty_recall_block_is_safe_when_no_nodes_match(tmp_path):

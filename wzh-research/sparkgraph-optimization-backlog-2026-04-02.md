@@ -15,6 +15,8 @@
 6. `last_recalled_at` / `recall_hits` 已接入，`active -> deprecated` 已进入 maintenance 主链
 7. 新增近义 troubleshooting 写入已能优先更新旧节点，而不是继续长出新的 Redis 重复节点
 8. 同一轮 `sparkgraph_record` 写入的明显相关节点，已开始自动补 `RELATED_TO` 边
+9. recall hit 只在非空 recall block 真正注入时记账
+10. maintenance 已移出同步主写入路径，改挂到 background review / flush
 
 ## P0：Active 治理做实
 
@@ -38,6 +40,10 @@
 3. edge 信号尚未进入 active support
    - 当前已开始真实写 `RELATED_TO`
    - 但 active 治理尚未利用边数量/边权重作为 support 的一部分
+4. background review maintenance 还没有 dirty-flag
+   - 目前已经不阻塞主回复
+   - 但仍可能在“没有任何 SparkGraph 变化”的 review 中扫描全图
+   - 后续可按 `memory_success / sparkgraph_success / fallback write` 做 gating
 
 ## P1：历史重复节点治理
 

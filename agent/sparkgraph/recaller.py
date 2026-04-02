@@ -62,7 +62,7 @@ def recall_nodes(
     if embedding_enabled(embedding_config):
         try:
             query_vector = create_embedding(query, embedding_config)
-            for candidate in store.list_vector_nodes(status="active", limit=config.vector_limit):
+            for candidate in store.list_vector_nodes(status="active", limit=None):
                 if not _is_recall_eligible(candidate):
                     continue
                 similarity = cosine_similarity(query_vector, candidate.get("embedding") or [])

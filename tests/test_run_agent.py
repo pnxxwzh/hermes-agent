@@ -346,10 +346,6 @@ class TestSparkGraphBackgroundReview:
                 "tools.sparkgraph_tool.sparkgraph_record_tool",
                 return_value=json.dumps({"success": True}),
             ) as mock_record,
-            patch(
-                "agent.sparkgraph.maintenance.run_flush_maintenance",
-                return_value={"scanned": 1, "deprecated": 0},
-            ) as mock_maintenance,
         ):
             result = agent._invoke_tool(
                 "sparkgraph_record",
@@ -372,9 +368,6 @@ class TestSparkGraphBackgroundReview:
         assert mock_record.call_args.kwargs["session_id"] == "session-123"
         assert mock_record.call_args.kwargs["turn_index"] == 7
         assert mock_record.call_args.kwargs["source_kind"] == "review"
-        mock_maintenance.assert_called_once()
-        assert mock_maintenance.call_args.args == (agent._sparkgraph_store,)
-        assert "embedding_config" in mock_maintenance.call_args.kwargs
 
     def test_background_review_summary_marks_sparkgraph_skipped(self, agent):
         agent._sparkgraph_enabled = True
@@ -430,6 +423,62 @@ class TestSparkGraphBackgroundReview:
             time.sleep(0.2)
 
         assert any("SparkGraph skipped" in line for line in captured)
+
+    def test_background_review_runs_sparkgraph_maintenance(self, agent):
+        agent._sparkgraph_enabled = True
+        agent._sparkgraph_store = MagicMock()
+        agent._sparkgraph_manager = MagicMock()
+        agent._sparkgraph_manager.config.embedding = MagicMock()
+        agent._memory_store = MagicMock()
+
+        review_messages = [
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": "sparkgraph_record",
+                            "arguments": "{}",
+                        }
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "content": json.dumps(
+                    {
+                        "success": True,
+                        "recorded_ids": ["node-1"],
+                    }
+                ),
+            },
+        ]
+
+        with (
+            patch("run_agent.AIAgent") as mock_review_cls,
+            patch.object(agent, "_enable_background_review_sparkgraph", return_value=True),
+            patch(
+                "agent.sparkgraph.maintenance.run_flush_maintenance",
+                return_value={"scanned": 3, "deprecated": 1, "vectors_backfilled": 2},
+            ) as mock_maintenance,
+        ):
+            review_agent = MagicMock()
+            review_agent._session_messages = review_messages
+            review_agent.client = None
+            mock_review_cls.return_value = review_agent
+
+            agent._spawn_background_review(
+                messages_snapshot=[{"role": "user", "content": "Remember this rule"}],
+                review_memory=True,
+                review_skills=False,
+            )
+
+            import time
+            time.sleep(0.2)
+
+        mock_maintenance.assert_called_once()
+        assert mock_maintenance.call_args.args == (agent._sparkgraph_store,)
+        assert "embedding_config" in mock_maintenance.call_args.kwargs
 
     def test_extract_background_review_memory_items(self, agent):
         items = agent._extract_background_review_memory_items(
