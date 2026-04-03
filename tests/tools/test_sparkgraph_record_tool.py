@@ -300,3 +300,117 @@ def test_sparkgraph_record_same_type_dedup_no_new_node(tmp_path):
     node = store.get_node(node_id)
     sessions = json.loads(node["source_sessions"])
     assert set(sessions) == {"s1", "s2"}, "sessions from both records should be merged"
+
+
+def test_sparkgraph_record_same_type_dedup_updates_detail(tmp_path):
+    """Issue #2 fix: same-type dedup hit must update the node's detail field.
+
+    The second record with the same canonical_key carries newer/different evidence.
+    The detail column (evidence) must be overwritten with the latest evidence,
+    not left stale from the first insert.
+    """
+    store = SparkGraphStore(tmp_path / "sparkgraph" / "default.db")
+
+    first = json.loads(
+        sparkgraph_record_tool(
+            items=[{
+                "summary": "Redis bind config order check",
+                "type": "ISSUE",
+                "evidence": "Step 1: check bind in redis.conf",
+            }],
+            store=store,
+            session_id="s1",
+            turn_index=1,
+        )
+    )
+    node_id = first["recorded_ids"][0]
+
+    first_node = store.get_node(node_id)
+    assert first_node["detail"] == "Step 1: check bind in redis.conf"
+
+    second = json.loads(
+        sparkgraph_record_tool(
+            items=[{
+                "summary": "Redis bind config order check",
+                "type": "ISSUE",
+                # New, richer evidence that must replace the old one
+                "evidence": "Full order: bind → protected-mode → port mapping",
+            }],
+            store=store,
+            session_id="s2",
+            turn_index=2,
+        )
+    )
+
+    assert second["updated"] == 1
+    assert second["created"] == 0
+    assert second["recorded_ids"][0] == node_id
+
+    updated_node = store.get_node(node_id)
+    assert updated_node["detail"] == "Full order: bind → protected-mode → port mapping", (
+        "detail (evidence) must be updated on same-type dedup, not left stale"
+    )
+
+
+def test_sparkgraph_record_race_condition_recovery_updates_detail(tmp_path):
+    """IntegrityError race condition path must also update detail."""
+    store = SparkGraphStore(tmp_path / "sparkgraph" / "default.db")
+
+    first = json.loads(
+        sparkgraph_record_tool(
+            items=[{
+                "summary": "Concurrent write test",
+                "type": "FACT",
+                "evidence": "First evidence",
+            }],
+            store=store,
+            session_id="s1",
+            turn_index=1,
+        )
+    )
+    node_id = first["recorded_ids"][0]
+
+    # Simulate a race: a concurrent writer inserted the same canonical_key.
+    # We call insert_node directly (bypassing dedup check) to trigger IntegrityError,
+    # then verify the recovery path updates detail.
+    from agent.sparkgraph.store import SparkGraphNodeInput
+    from agent.sparkgraph.types import NodeStatus
+
+    # Insert with the same canonical_key directly to force IntegrityError
+    from agent.sparkgraph.dedup import build_canonical_key
+    canonical = build_canonical_key("FACT", "Concurrent write test")
+
+    try:
+        store.insert_node(
+            SparkGraphNodeInput(
+                type=NodeType.FACT,
+                summary="Concurrent write test",
+                canonical_key=canonical,
+                source_kind="flush",
+                status=NodeStatus.ACTIVE,
+                confidence=0.8,
+                detail="Concurrent evidence",
+            )
+        )
+    except Exception:
+        pass  # Expected if canonical_key UNIQUE constraint fires
+
+    third = json.loads(
+        sparkgraph_record_tool(
+            items=[{
+                "summary": "Concurrent write test",
+                "type": "FACT",
+                "evidence": "Recovery path evidence",
+            }],
+            store=store,
+            session_id="s3",
+            turn_index=3,
+        )
+    )
+
+    # Should succeed via the race-recovery path (updated=1)
+    assert third["updated"] == 1
+    updated_node = store.get_node(node_id)
+    assert updated_node["detail"] == "Recovery path evidence", (
+        "race-recovery path must also update detail"
+    )

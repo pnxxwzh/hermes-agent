@@ -83,6 +83,16 @@ def _min_vector_similarity(query: str) -> float:
 # ─── Hit merging ─────────────────────────────────────────────────
 
 
+def _is_injectable(node: dict[str, Any]) -> bool:
+    """Return False for nodes that must not appear in recall output or PPR ranking."""
+    di = node.get("default_inject")
+    # default_inject=0 nodes (reflection/shadow source) are excluded from recall entirely.
+    # Check both the int column value and a possible bool-ish representation.
+    if di is not None and int(di) == 0:
+        return False
+    return True
+
+
 def _merge_hit(
     merged: dict[str, dict[str, Any]],
     node: dict[str, Any],
@@ -93,6 +103,10 @@ def _merge_hit(
 ) -> None:
     node_id = str(node.get("id") or "")
     if not node_id:
+        return
+    # default_inject=0 nodes must never enter the candidate set — they must not
+    # influence PPR rankings or appear in output.
+    if not _is_injectable(node):
         return
     existing = merged.get(node_id)
     if existing is None:
@@ -184,6 +198,7 @@ def _rank_nodes(
 
 
 def _vector_search(
+    store: SparkGraphStore,
     query: str,
     config: RecallConfig,
     embedding_config: SparkGraphEmbeddingConfig | None,
@@ -193,7 +208,7 @@ def _vector_search(
         query_vector = create_embedding(query, embedding_config)
         min_similarity = _min_vector_similarity(query)
         results: list[dict[str, Any]] = []
-        for candidate in _list_active_vector_nodes(embedding_config):
+        for candidate in _list_active_vector_nodes(store):
             similarity = cosine_similarity(query_vector, candidate.get("embedding") or [])
             if similarity < min_similarity:
                 continue
@@ -207,19 +222,10 @@ def _vector_search(
 
 
 def _list_active_vector_nodes(
-    embedding_config: SparkGraphEmbeddingConfig | None,
+    store: SparkGraphStore,
 ) -> list[dict[str, Any]]:
-    """List active nodes that have vectors."""
-    from agent.sparkgraph.store import SparkGraphStore
-    from pathlib import Path
-    from agent.sparkgraph.config import SparkGraphConfig
-
-    db_path = Path(embedding_config.db_path) if embedding_config else SparkGraphConfig.from_env().db_path
-    store = SparkGraphStore(db_path)
-    try:
-        return store.list_vector_nodes(status=NodeStatus.ACTIVE.value)
-    finally:
-        store.close()
+    """List active nodes that have vectors (reuses caller's store, no new connection)."""
+    return store.list_vector_nodes(status=NodeStatus.ACTIVE.value)
 
 
 # ─── Main recall entry point ──────────────────────────────────────
@@ -252,7 +258,7 @@ def recall_nodes(
         status=NodeStatus.ACTIVE.value,
         limit=config.search_limit,
     )
-    raw_vector = _vector_search(query, config, embedding_config) if embedding_enabled(embedding_config) else []
+    raw_vector = _vector_search(store, query, config, embedding_config) if embedding_enabled(embedding_config) else []
 
     # 合并去重
     merged: dict[str, dict[str, Any]] = {}

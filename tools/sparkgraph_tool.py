@@ -539,6 +539,7 @@ def sparkgraph_record_tool(
                 confidence=score_result.confidence,
                 status=score_result.initial_status.value,
                 confidence_components=None,
+                detail=evidence,  # 同类型去重时用最新 evidence 覆盖旧 detail
             )
             store.increment_validated_count([same_type_existing.node_id])
             store.merge_source_sessions(same_type_existing.node_id, session_id)
@@ -599,6 +600,7 @@ def sparkgraph_record_tool(
                 SparkGraphNodeInput(
                     type=node_type,
                     summary=summary,
+                    detail=evidence,  # store evidence as detail on initial insert
                     canonical_key=canonical_key,
                     source_kind=source_kind,
                     status=score_result.initial_status,
@@ -619,6 +621,7 @@ def sparkgraph_record_tool(
                     confidence=score_result.confidence,
                     status=score_result.initial_status.value,
                     confidence_components=None,
+                    detail=evidence,  # race-recovery path also refreshes detail
                 )
                 store.increment_validated_count([existing_by_key["id"]])
                 store.merge_source_sessions(existing_by_key["id"], session_id)

@@ -193,20 +193,48 @@ class SparkGraphStore:
             (merged_validated, json.dumps(list(all_sessions), sort_keys=True), now, keep_id),
         )
 
-        # 3. 迁移边（from_id/to_id 替换）
+        # 3. 迁移边（from_id/to_id 替换）——去重在迁移前先执行，防止 UNIQUE 约束冲突
+        # 先删：删除会导致 UNIQUE 冲突的 merge 边（这些边迁移后与 keep 的边重复，保留 keep 的那条）
+        #
+        # 三种冲突模式：
+        # Case 1 — merge→X where X is a keep destination:
+        #   migrate creates duplicate keep→X → delete merge→X
+        # Case 2 — A→merge where A also→keep:
+        #   migrate creates duplicate A→keep → delete A→merge
+        # Case 3 — keep→merge:
+        #   migrate keep→merge to keep→keep creates a self-loop,
+        #   which violates CHECK (from_id <> to_id) → delete keep→merge
+        self._conn.execute(f"""
+            DELETE FROM {EDGES_TABLE}
+            WHERE (
+                from_id = ?
+                AND to_id IN (SELECT to_id FROM {EDGES_TABLE} WHERE from_id = ?)
+            )
+            OR (
+                to_id = ?
+                AND from_id IN (SELECT from_id FROM {EDGES_TABLE} WHERE to_id = ?)
+            )
+            OR (
+                from_id = ?
+                AND to_id = ?
+            )
+        """, (merge_id, keep_id, merge_id, keep_id, keep_id, merge_id))
+
+        # 迁移 from_id
         self._conn.execute(
             f"""UPDATE {EDGES_TABLE}
                 SET from_id = ? WHERE from_id = ?""",
             (keep_id, merge_id),
         )
+        # 迁移 to_id
         self._conn.execute(
             f"""UPDATE {EDGES_TABLE}
                 SET to_id = ? WHERE to_id = ?""",
             (keep_id, merge_id),
         )
 
-        # 4. 删除自环
-        self._conn.execute(f"DELETE FROM {EDGES_TABLE} WHERE from_id = to_id")
+        # 4. 删除自环（限制范围：只删 merge_id 产生的自环，避免影响数据库中其他不相关的自环）
+        self._conn.execute(f"DELETE FROM {EDGES_TABLE} WHERE from_id = to_id AND (from_id = ? OR to_id = ?)", (merge_id, merge_id))
 
         # 5. 去重：保留第一条，删除后续重复
         self._conn.execute(f"""
@@ -224,6 +252,15 @@ class SparkGraphStore:
         )
 
         self._conn.commit()
+
+        # 7. 失效 PPR 图缓存（merge 改变了图结构）
+        # Deferred import to avoid circular dependency: pagerank → store
+        try:
+            from agent.sparkgraph.pagerank import invalidate_graph_cache
+            invalidate_graph_cache()
+        except Exception:
+            # Non-fatal: cache will naturally expire after TTL
+            pass
 
     def count_nodes(self, *, status: str | None = None) -> int:
         sql = f"SELECT COUNT(*) AS count FROM {NODES_TABLE}"
@@ -253,7 +290,15 @@ class SparkGraphStore:
         confidence: float,
         status: str,
         confidence_components: dict[str, Any] | None = None,
+        detail: str | None = None,
     ) -> None:
+        """Update scoring fields and optionally the detail column.
+
+        Args:
+            detail: When provided, overwrites the node's detail field with the new value.
+                    This is used during same-type dedup hits so that the newest evidence
+                    from the arriving record replaces the old detail.
+        """
         current = self.get_node(node_id)
         if not current:
             return
@@ -263,20 +308,39 @@ class SparkGraphStore:
         elif confidence_components is None and "confidence_components" in meta:
             # Explicit None → 清除旧字段，保持 meta 干净
             del meta["confidence_components"]
-        self._conn.execute(
-            f"""
-            UPDATE {NODES_TABLE}
-            SET confidence = ?, status = ?, meta = ?, updated_at = ?
-            WHERE id = ?
-            """,
-            (
-                confidence,
-                status,
-                json.dumps(meta, sort_keys=True),
-                int(time.time()),
-                node_id,
-            ),
-        )
+
+        if detail is not None:
+            # detail provided → update it along with scoring fields
+            self._conn.execute(
+                f"""
+                UPDATE {NODES_TABLE}
+                SET confidence = ?, status = ?, detail = ?, meta = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    confidence,
+                    status,
+                    str(detail),
+                    json.dumps(meta, sort_keys=True),
+                    int(time.time()),
+                    node_id,
+                ),
+            )
+        else:
+            self._conn.execute(
+                f"""
+                UPDATE {NODES_TABLE}
+                SET confidence = ?, status = ?, meta = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    confidence,
+                    status,
+                    json.dumps(meta, sort_keys=True),
+                    int(time.time()),
+                    node_id,
+                ),
+            )
         self._conn.commit()
 
     def update_node_status(self, node_id: str, *, status: str) -> None:
