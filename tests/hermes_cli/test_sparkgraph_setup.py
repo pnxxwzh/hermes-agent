@@ -192,8 +192,10 @@ def test_setup_sparkgraph_probe_failure_can_restore_defaults(tmp_path, monkeypat
 
     setup_sparkgraph(config)
 
-    assert config["sparkgraph"]["embedding"]["provider"] == ""
-    assert config["sparkgraph"]["embedding"]["model"] == ""
+    # After restoring defaults with the new default config, embedding uses local bge-m3 server
+    assert config["sparkgraph"]["embedding"]["provider"] == "custom"
+    assert config["sparkgraph"]["embedding"]["model"] == "bge-m3-mlx-8bit"
+    assert config["sparkgraph"]["embedding"]["base_url"] == "http://127.0.0.1:8000/v1"
 
 
 def test_setup_sparkgraph_embedding_prompt_order(tmp_path, monkeypatch):

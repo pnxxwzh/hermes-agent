@@ -46,7 +46,7 @@ def test_recall_nodes_filters_to_active_and_high_confidence(tmp_path):
     )
     assert good_id != low_conf_id
 
-    nodes = recall_nodes(store, query="socksio proxy", config=RecallConfig(max_nodes=4))
+    nodes, _edges = recall_nodes(store, query="socksio proxy", config=RecallConfig(max_nodes=4))
     assert [node["id"] for node in nodes] == [good_id]
 
 
@@ -70,7 +70,7 @@ def test_recall_nodes_expands_one_hop_related_nodes(tmp_path):
         edge_type=EdgeType.RELATED_TO,
     )
 
-    nodes = recall_nodes(
+    nodes, _edges = recall_nodes(
         store,
         query="libGL browser startup",
         config=RecallConfig(search_limit=4, related_limit=4, max_nodes=4),
@@ -219,7 +219,7 @@ def test_recall_nodes_excludes_deprecated_nodes(tmp_path):
         )
     )
 
-    nodes = recall_nodes(store, query="socks proxy", config=RecallConfig(max_nodes=8))
+    nodes, _edges = recall_nodes(store, query="socks proxy", config=RecallConfig(max_nodes=8))
     node_ids = {node["id"] for node in nodes}
     assert active_id in node_ids
     assert deprecated_id not in node_ids
@@ -244,7 +244,7 @@ def test_recall_nodes_excludes_low_stability_active_nodes(tmp_path):
         stability=0.3,
     )
 
-    nodes = recall_nodes(store, query="socks proxy", config=RecallConfig(max_nodes=8))
+    nodes, _edges = recall_nodes(store, query="socks proxy", config=RecallConfig(max_nodes=8))
     node_ids = {node["id"] for node in nodes}
     assert strong_id in node_ids
     assert weak_id not in node_ids
@@ -284,7 +284,7 @@ def test_recall_nodes_vector_search_can_hit_older_relevant_nodes(tmp_path, monke
 
     monkeypatch.setattr("agent.sparkgraph.recaller.create_embedding", lambda *a, **kw: [1.0, 0.0, 0.0])
 
-    nodes = recall_nodes(
+    nodes, _edges = recall_nodes(
         store,
         query="field mapping problem",
         config=RecallConfig(search_limit=4, related_limit=0, max_nodes=4, vector_limit=4),
@@ -352,7 +352,7 @@ def test_recall_nodes_can_use_embedding_when_fts_misses(tmp_path, monkeypatch):
 
     monkeypatch.setattr("agent.sparkgraph.recaller.create_embedding", _fake_embed)
 
-    nodes = recall_nodes(
+    nodes, _edges = recall_nodes(
         store,
         query="service is up but clients cannot connect remotely",
         config=RecallConfig(max_nodes=4, search_limit=4),
@@ -377,7 +377,7 @@ def test_recall_nodes_skip_low_signal_greeting_queries(tmp_path):
         canonical_key="fact:user-hallo-onboarding",
     )
 
-    nodes = recall_nodes(store, query="hallo", config=RecallConfig(max_nodes=4))
+    nodes, _edges = recall_nodes(store, query="hallo", config=RecallConfig(max_nodes=4))
     assert nodes == []
 
 
@@ -410,7 +410,7 @@ def test_recall_nodes_rank_vector_hits_by_similarity_before_recency(tmp_path, mo
         lambda *args, **kwargs: [1.0, 0.0, 0.0],
     )
 
-    nodes = recall_nodes(
+    nodes, _edges = recall_nodes(
         store,
         query="redis remote clients cannot connect",
         config=RecallConfig(max_nodes=2, search_limit=2, vector_limit=2, related_limit=0),

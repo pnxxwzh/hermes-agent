@@ -15,6 +15,7 @@ class NodeType(str, Enum):
 
 class EdgeType(str, Enum):
     RELATED_TO = "RELATED_TO"
+    SOLVES = "SOLVES"
     DEPENDS_ON = "DEPENDS_ON"
     CONFLICTS_WITH = "CONFLICTS_WITH"
     DERIVED_FROM = "DERIVED_FROM"

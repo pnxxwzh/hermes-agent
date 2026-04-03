@@ -5464,6 +5464,7 @@ class AIAgent:
                             turn_index=self._user_turn_count,
                             source_kind="flush",
                             embedding_config=(self._sparkgraph_manager.config.embedding if self._sparkgraph_manager else None),
+                            edges=args.get("edges"),
                         )
                         logger.warning(
                             "flush_memories sparkgraph_record executed: items=%s session_id=%s turn_index=%s",

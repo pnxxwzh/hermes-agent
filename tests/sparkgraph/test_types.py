@@ -14,6 +14,7 @@ def test_node_types_match_v2_contract():
 def test_edge_types_match_v2_contract():
     assert [item.value for item in EdgeType] == [
         "RELATED_TO",
+        "SOLVES",
         "DEPENDS_ON",
         "CONFLICTS_WITH",
         "DERIVED_FROM",

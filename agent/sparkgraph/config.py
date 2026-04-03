@@ -20,10 +20,12 @@ DEFAULT_SPARKGRAPH_CONFIG: Dict[str, Any] = {
         "max_chars": 1800,
     },
     "embedding": {
-        "provider": "",
-        "model": "",
-        "base_url": "",
-        "api_key": "",
+        # Local bge-m3-mlx-8bit embedding server (OpenAI-compatible API)
+        # 1024-dim multilingual embeddings including Chinese
+        "provider": "custom",
+        "model": "bge-m3-mlx-8bit",
+        "base_url": "http://127.0.0.1:8000/v1",
+        "api_key": "1234",
         "timeout": 20,
     },
 }

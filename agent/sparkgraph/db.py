@@ -8,7 +8,7 @@ from pathlib import Path
 
 from agent.sparkgraph.config import SparkGraphConfig, resolve_sparkgraph_db_path, sparkgraph_home
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 MIGRATIONS_TABLE = "_migrations"
 NODES_TABLE = "sg_nodes"
@@ -19,7 +19,7 @@ NODES_FTS_TABLE = "sg_nodes_fts"
 
 NODE_TYPES = ("FACT", "PREFERENCE", "ISSUE", "RESOURCE", "DECISION")
 NODE_STATUSES = ("candidate", "active", "deprecated")
-EDGE_TYPES = ("RELATED_TO", "DEPENDS_ON", "CONFLICTS_WITH", "DERIVED_FROM", "APPLIES_TO")
+EDGE_TYPES = ("RELATED_TO", "SOLVES", "DEPENDS_ON", "CONFLICTS_WITH", "DERIVED_FROM", "APPLIES_TO")
 SOURCE_KINDS = ("auto", "explicit", "manual", "reflection", "review", "flush", "shadow")
 
 
@@ -172,6 +172,51 @@ def initialize_schema(conn: sqlite3.Connection) -> None:
         conn.execute(
             f"ALTER TABLE {NODES_TABLE} ADD COLUMN last_recalled_at INTEGER NOT NULL DEFAULT 0"
         )
+
+    # ── Migration v3: add SOLVES to sg_edges CHECK constraint ──────────────────
+    # SQLite CHECK constraints cannot be altered in-place.
+    # Recreate sg_edges with updated CHECK, preserving all data and indexes.
+    try:
+        current_edge_sql = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+            (EDGES_TABLE,),
+        ).fetchone()
+        if current_edge_sql and "SOLVES" not in current_edge_sql[0]:
+            conn.execute(f"ALTER TABLE {EDGES_TABLE} RENAME TO {EDGES_TABLE}_old")
+            conn.execute(
+                f"""
+                CREATE TABLE {EDGES_TABLE} (
+                    id TEXT PRIMARY KEY,
+                    from_id TEXT NOT NULL,
+                    to_id TEXT NOT NULL,
+                    type TEXT NOT NULL,
+                    weight REAL NOT NULL DEFAULT 0,
+                    meta TEXT NOT NULL DEFAULT '{{}}',
+                    created_at INTEGER NOT NULL,
+                    FOREIGN KEY(from_id) REFERENCES {NODES_TABLE}(id) ON DELETE CASCADE,
+                    FOREIGN KEY(to_id) REFERENCES {NODES_TABLE}(id) ON DELETE CASCADE,
+                    CHECK(from_id <> to_id),
+                    CHECK(type IN ({edge_types_sql}))
+                )
+                """
+            )
+            conn.execute(
+                f"INSERT INTO {EDGES_TABLE}(id, from_id, to_id, type, weight, meta, created_at) "
+                f"SELECT id, from_id, to_id, type, weight, meta, created_at FROM {EDGES_TABLE}_old"
+            )
+            conn.execute(f"DROP TABLE {EDGES_TABLE}_old")
+            # Recreate indexes (SQLite doesn't persist index definitions in sqlite_master after RENAME)
+            conn.execute(f"CREATE INDEX IF NOT EXISTS ix_sg_edges_from_id ON {EDGES_TABLE}(from_id)")
+            conn.execute(f"CREATE INDEX IF NOT EXISTS ix_sg_edges_to_id ON {EDGES_TABLE}(to_id)")
+            conn.execute(f"CREATE INDEX IF NOT EXISTS ix_sg_edges_type ON {EDGES_TABLE}(type)")
+            conn.execute(
+                f"CREATE UNIQUE INDEX IF NOT EXISTS ux_sg_edges_unique "
+                f"ON {EDGES_TABLE}(from_id, to_id, type)"
+            )
+    except Exception:
+        # Migration is best-effort; if it fails the old table still works
+        pass
+    # ─────────────────────────────────────────────────────────────────────────
 
     conn.execute(
         f"""

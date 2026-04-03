@@ -47,7 +47,7 @@ class SparkGraphManager:
             return ""
         store = self.ensure_store()
         recall_cfg = self.config.recall
-        nodes = recall_nodes(
+        nodes, edges = recall_nodes(
             store,
             query=query,
             config=RecallConfig(
@@ -58,6 +58,7 @@ class SparkGraphManager:
         )
         block, included_ids = build_recall_payload(
             nodes,
+            edges=edges,
             max_chars=max_chars if max_chars is not None else recall_cfg.max_chars,
         )
         if block and included_ids:

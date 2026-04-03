@@ -291,7 +291,15 @@ class SparkGraphStore:
         for idx, quoted in enumerate(quoted_parts):
             sanitized = sanitized.replace(f"\x00Q{idx}\x00", quoted)
 
-        return sanitized.strip()
+        result = sanitized.strip()
+
+        # CJK Unicode ranges for Chinese character detection
+        cjk_pattern = "[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff]"
+        if re.search(cjk_pattern, result):
+            if not result.endswith("*"):
+                result += "*"
+
+        return result
 
     def search_nodes(self, query: str, *, status: str | None = None, limit: int = 8):
         if not query or not query.strip():
@@ -425,35 +433,69 @@ class SparkGraphStore:
         self._conn.commit()
 
     def get_related_nodes(self, node_ids: list[str], *, active_only: bool = True, limit: int = 4):
+        """
+        Find 1-hop neighbours of seed nodes, excluding the seeds themselves.
+
+        Uses two separate traversals (aligned with gm graphWalk):
+          1. FROM-seed:  edge (seed → X), return X (X must not be a seed)
+          2. TO-seed:    edge (X → seed), return X (X must not be a seed)
+
+        When both endpoints are seeds (seed ↔ seed), neither direction produces
+        a valid non-seed result — those edges are ignored as intended.
+        """
         if not node_ids:
             return []
 
-        placeholders = ", ".join("?" for _ in node_ids)
-        params: list[Any] = list(node_ids)
-        where_parts = [
-            f"(e.from_id IN ({placeholders}) OR e.to_id IN ({placeholders}))",
-            "n.id NOT IN (" + placeholders + ")",
-        ]
-        params.extend(node_ids)
-        params.extend(node_ids)
-        if active_only:
-            where_parts.append("n.status = ?")
-            params.append(NodeStatus.ACTIVE.value)
-        params.append(max(1, int(limit)))
+        sp = ", ".join("?" for _ in node_ids)
+        limit_val = max(1, int(limit))
+        status_cond = "AND n.status = ?" if active_only else ""
+        status_param = [NodeStatus.ACTIVE.value] if active_only else []
 
-        rows = self._conn.execute(
-            f"""
+        # Two sub-queries unioned:
+        #   from-seed:  e.from_id IS a seed → return e.to_id (must NOT be seed)
+        #   to-seed:    e.to_id   IS a seed → return e.from_id (must NOT be seed)
+        sql = f"""
             SELECT DISTINCT n.*
-            FROM {EDGES_TABLE} e
-            JOIN {NODES_TABLE} n
-              ON n.id = CASE
-                  WHEN e.from_id IN ({placeholders}) THEN e.to_id
-                  ELSE e.from_id
-              END
-            WHERE {" AND ".join(where_parts)}
+            FROM (
+                SELECT e.to_id AS nid
+                FROM {EDGES_TABLE} e
+                WHERE e.from_id IN ({sp})
+                  AND e.to_id NOT IN ({sp})
+                UNION
+                SELECT e.from_id AS nid
+                FROM {EDGES_TABLE} e
+                WHERE e.to_id IN ({sp})
+                  AND e.from_id NOT IN ({sp})
+            )
+            JOIN {NODES_TABLE} n ON n.id = nid
+            {"WHERE n.status = ?" if active_only else ""}
             ORDER BY n.updated_at DESC
-            LIMIT ?
-            """,
-            tuple(node_ids + params),
-        ).fetchall()
+            LIMIT {limit_val}
+            """
+        # Params: [seeds × 4] + [status?]
+        #   subq1: e.from_id IN(s) + e.to_id NOT IN(s) = 2N
+        #   subq2: e.to_id IN(s) + e.from_id NOT IN(s) = 2N
+        #   outer: n.status = ? (if active_only) = 0 or 1
+        params = list(node_ids) * 4 + status_param
+        rows = self._conn.execute(sql, tuple(params)).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_edges_for_nodes(self, node_ids: list[str]) -> list[dict[str, Any]]:
+        """
+        Fetch all edges where both endpoints are in node_ids.
+
+        Mirrors gm graphWalk's edge fetch:
+          SELECT * FROM gm_edges WHERE from_id IN (node_ids) AND to_id IN (node_ids)
+        """
+        if not node_ids:
+            return []
+        sp = ", ".join("?" for _ in node_ids)
+        sql = f"""
+            SELECT e.*
+            FROM {EDGES_TABLE} e
+            WHERE e.from_id IN ({sp})
+              AND e.to_id   IN ({sp})
+            ORDER BY e.created_at ASC
+        """
+        rows = self._conn.execute(sql, tuple(node_ids) * 2).fetchall()
         return [dict(row) for row in rows]

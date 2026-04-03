@@ -91,8 +91,43 @@ def run_flush_maintenance(
             except Exception:
                 continue
 
-    return {
+    result: dict[str, int] = {
         "scanned": scanned,
         "deprecated": deprecated,
         "vectors_backfilled": vectors_backfilled,
     }
+
+    # PPR maintenance (lightweight, called on session_end)
+    ppr_result = run_ppr_maintenance(store)
+    result["ppr_computed"] = ppr_result.get("ppr_computed")  # type: ignore[assignment]
+
+    return result
+
+
+# ─── PPR maintenance ────────────────────────────────────────────
+
+
+def run_ppr_maintenance(store: SparkGraphStore) -> dict[str, bool | int | str | None]:
+    """
+    Compute global PageRank for graph health diagnostics.
+
+    Currently: reads-only, does not write back to sg_nodes.
+    Future: write scores to sg_nodes.pagerank column.
+
+    Also invalidates the graph-structure cache after computation.
+    """
+    from agent.sparkgraph.pagerank import compute_global_pagerank, invalidate_graph_cache
+
+    try:
+        scores = compute_global_pagerank(store)
+        invalidate_graph_cache()
+        top_node = (
+            max(scores.items(), key=lambda x: x[1])[0] if scores else None
+        )
+        return {
+            "ppr_computed": True,
+            "nodes_scored": len(scores),
+            "top_node": top_node,
+        }
+    except Exception as exc:
+        return {"ppr_computed": False, "error": str(exc)}
