@@ -342,7 +342,12 @@ class TestRecallWithPPR:
         assert nid_b in ids  # 1-hop neighbour
 
     def test_candidate_only_nodes_recall_empty(self, tmp_path):
-        """Only candidate-status nodes → recall returns [] (existing behaviour)."""
+        """CANDIDATE nodes with zero evidence can be recalled via L3 COLD (B1 fix).
+
+        The old behaviour (candidate nodes always returning []) is superseded by the
+        three-layer recall architecture: zero-evidence candidates with confidence>=0.40
+        enter L3 COLD and are discoverable as a cold-start fallback.
+        """
         store = SparkGraphStore(tmp_path / "sg.db")
         store.insert_node(
             SparkGraphNodeInput(
@@ -358,7 +363,9 @@ class TestRecallWithPPR:
         nodes, _edges = recall_nodes(
             store, query="candidate", config=RecallConfig(max_nodes=4)
         )
-        assert nodes == []
+        # B1 fix: zero-evidence CANDIDATE with confidence>=0.40 enters L3 COLD
+        assert len(nodes) == 1
+        assert nodes[0]["status"] == NodeStatus.CANDIDATE.value
 
     def test_dedup_preserved_after_ppr(self, tmp_path):
         """Same node from direct+related appears only once in results."""

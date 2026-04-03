@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 from agent.sparkgraph.types import NodeType
 from agent.sparkgraph.types import NodeStatus
@@ -173,3 +174,45 @@ def next_status_for_candidate(
     ):
         return NodeStatus.ACTIVE
     return NodeStatus.CANDIDATE
+
+
+# ─── Evidence-based promotion (B1 cycle-break) ──────────────────
+
+
+def evidence_based_promotion(
+    node: dict[str, Any],
+) -> NodeStatus:
+    """Promote a CANDIDATE node based on evidence accumulation.
+
+    This breaks the B1 recall-cycle: a node that has been successfully
+    recalled (meaning it was useful enough to be fetched) earns evidence
+    counts that can push it to ACTIVE even if its initial confidence was low.
+
+    Rules:
+      - evidence >= 2  → always ACTIVE  (used multiple times = valuable)
+      - evidence == 1 AND confidence >= 0.65 → ACTIVE
+      - evidence == 1 AND confidence <  0.65 → CANDIDATE (keep accumulating)
+      - evidence == 0 → CANDIDATE (hasn't been proven useful yet)
+    """
+    status = node.get("status")
+    if status != NodeStatus.CANDIDATE.value:
+        return NodeStatus(status)
+
+    evidence_count = node.get("_evidence_count", 0)
+    # Fallback: if _evidence_count not injected, try counting from sg_evidence
+    # via the store (callers that pass pre-counted _evidence_count are preferred)
+    if evidence_count == 0 and "_evidence_count" not in node:
+        # Store-level callers should pre-inject _evidence_count; if absent
+        # we treat it as unknown — conservative path leaves node as candidate
+        evidence_count = 0
+
+    confidence = float(node.get("confidence") or 0.0)
+
+    if evidence_count >= 2:
+        return NodeStatus.ACTIVE
+
+    if evidence_count == 1 and confidence >= 0.65:
+        return NodeStatus.ACTIVE
+
+    return NodeStatus.CANDIDATE
+

@@ -15,6 +15,8 @@ Limitations (documented, not fixable at pre-flight level):
     SDKs (Firecrawl/Tavily) where redirect handling is on their servers.
 """
 
+from __future__ import annotations
+
 import ipaddress
 import logging
 import socket

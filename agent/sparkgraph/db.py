@@ -20,7 +20,7 @@ NODES_FTS_TABLE = "sg_nodes_fts"
 NODE_TYPES = ("FACT", "PREFERENCE", "ISSUE", "RESOURCE", "DECISION")
 NODE_STATUSES = ("candidate", "active", "deprecated")
 EDGE_TYPES = ("RELATED_TO", "SOLVES", "DEPENDS_ON", "CONFLICTS_WITH", "DERIVED_FROM", "APPLIES_TO")
-SOURCE_KINDS = ("auto", "explicit", "manual", "reflection", "review", "flush", "shadow")
+SOURCE_KINDS = ("auto", "explicit", "manual", "reflection", "review", "flush", "shadow", "recall")
 
 
 def ensure_sparkgraph_dir(hermes_home: Path | None = None) -> Path:

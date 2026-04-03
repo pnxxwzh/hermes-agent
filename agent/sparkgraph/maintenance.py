@@ -9,6 +9,7 @@ from agent.sparkgraph.config import SparkGraphEmbeddingConfig
 from agent.sparkgraph.embedding import create_embedding, embedding_content_hash, embedding_enabled
 from agent.sparkgraph.scoring import (
     DEPRECATE_STABILITY_THRESHOLD,
+    evidence_based_promotion,
     should_deprecate_active,
     support_score,
 )
@@ -37,15 +38,25 @@ def run_flush_maintenance(
     deprecated = 0
     scanned = len(stale_candidates)
     for node in stale_candidates:
+        node_id = node["id"]
         confidence = float(node.get("confidence") or 0.0)
         stability = float(node.get("stability") or 0.0)
-        evidence_count = store.count_evidence(node["id"])
+        evidence_count = store.count_evidence(node_id)
+        node["_evidence_count"] = evidence_count
+
+        # B1 cycle-break: if evidence-based promotion says ACTIVE, promote instead
+        # of deprecating (the node was useful enough to be recalled)
+        proposed = evidence_based_promotion(node)
+        if proposed == NodeStatus.ACTIVE:
+            store.update_node_status(node_id, status=NodeStatus.ACTIVE.value)
+            continue
+
         if (
             confidence <= STALE_CANDIDATE_CONFIDENCE_MAX
             and stability < DEPRECATE_STABILITY_THRESHOLD
             and evidence_count <= 1
         ):
-            store.update_node_status(node["id"], status=NodeStatus.DEPRECATED.value)
+            store.update_node_status(node_id, status=NodeStatus.DEPRECATED.value)
             deprecated += 1
 
     stale_actives = store.list_nodes(status=NodeStatus.ACTIVE.value)

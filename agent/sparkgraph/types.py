@@ -26,3 +26,16 @@ class NodeStatus(str, Enum):
     CANDIDATE = "candidate"
     ACTIVE = "active"
     DEPRECATED = "deprecated"
+
+
+class RecallChannel(str, Enum):
+    """三条召回通道，对应 recall_eligibility 的三个层次。
+
+    L1 DIRECT — 精准匹配，含 candidate（需 evidence>=1）
+    L2 GRAPH  — 图扩展，active-only
+    L3 COLD   — 零 evidence candidate 兜底
+    """
+
+    DIRECT = "direct"
+    GRAPH = "graph"
+    COLD = "cold"
