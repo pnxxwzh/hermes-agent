@@ -49,6 +49,10 @@ def build_recall_payload(
         node_id = str(node.get("id") or "").strip()
         if not summary or not node_type:
             continue
+        # default_inject=0 nodes are suppressed from recall output
+        di = node.get("default_inject")
+        if di is not None and int(di) == 0:
+            continue
         candidate_line = f"- [{node_type}] {summary}"
         trial_lines = lines + [candidate_line]
         trial_block = "\n".join(trial_lines)

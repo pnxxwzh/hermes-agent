@@ -535,6 +535,7 @@ def sparkgraph_record_tool(
                 existing.node_id,
                 confidence=score_result.confidence,
                 status=score_result.initial_status.value,
+                confidence_components=None,  # 清除旧字段，保持 meta 干净
             )
             # 去重命中：validated_count++（知识再次被确认）
             store.increment_validated_count([existing.node_id])

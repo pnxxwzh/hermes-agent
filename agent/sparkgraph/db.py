@@ -55,6 +55,19 @@ def connect_db(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
+def _rebuild_fts_table(conn: sqlite3.Connection) -> None:
+    """Rebuild sg_nodes_fts from sg_nodes content (used after table recreation)."""
+    conn.execute(f"DROP TABLE IF EXISTS {NODES_FTS_TABLE}")
+    create_sql = "CREATE VIRTUAL TABLE {fts} USING fts5(summary, detail, content='{tbl}', content_rowid='rowid')".format(
+        fts=NODES_FTS_TABLE, tbl=NODES_TABLE
+    )
+    conn.execute(create_sql)
+    conn.execute(
+        f"INSERT INTO {NODES_FTS_TABLE}(rowid, summary, detail) "
+        f"SELECT rowid, summary, detail FROM {NODES_TABLE}"
+    )
+
+
 def initialize_schema(conn: sqlite3.Connection) -> None:
     """Create the minimal SparkGraph schema if needed."""
     node_types_sql = ", ".join(f"'{value}'" for value in NODE_TYPES)
@@ -205,6 +218,9 @@ def initialize_schema(conn: sqlite3.Connection) -> None:
         conn.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS ux_sg_nodes_canonical_type ON {NODES_TABLE}(canonical_key, type)")
         conn.execute(f"CREATE INDEX IF NOT EXISTS ix_sg_nodes_status_type ON {NODES_TABLE}(status, type)")
         conn.execute(f"CREATE INDEX IF NOT EXISTS ix_sg_nodes_updated_at ON {NODES_TABLE}(updated_at)")
+        # Rebuild FTS index so search_nodes() still works after table recreation
+        if table == NODES_TABLE:
+            _rebuild_fts_table(conn)
 
     # ── Migration v3: add SOLVES to sg_edges CHECK constraint ──────────────────
     # SQLite CHECK constraints cannot be altered in-place.

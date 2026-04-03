@@ -1,12 +1,14 @@
-"""SparkGraph recall — simplified two-channel architecture aligned with graph-memory.
+"""SparkGraph recall — three-channel architecture aligned with graph-memory.
 
-召回通道（只有两条）：
+召回通道：
   1. 精确通道：FTS + 向量搜索合并去重
   2. 图扩展通道：1-hop active 邻居（以精确通道 top2 为种子）
+  3. explicit/manual 优先通道：按 source_kind 过滤后补充（高 match_priority=4）
 
 排序：recall_priority_score(PPR×1000 + sourceBonus + validatedCount×5 + confidence×100 - superseded×500)
 
-无 CANDIDATE，无 evidence，无三通道，无 L3 COLD 兜底。
+无 CANDIDATE，无 evidence，无 L3 COLD 兜底。
+default_inject=0 的节点在 recall 输出层被过滤（不可注入）。
 """
 
 from __future__ import annotations
@@ -271,6 +273,9 @@ def recall_nodes(
                 graph_hits.append(node)
 
     # ── Channel 3: explicit/manual 优先补充 ─────────────────────────
+    # 注：get_by_source_kind 用宽松 LIKE '%term%' 过滤，任何包含查询词的
+    # explicit/manual 节点都会被纳入。match_priority=4 为最高优先级，保证
+    # 用户显式记录的内容在排序时被优先考虑，不因 FTS/向量得分低而被淘汰。
     explicit_kinds = {"explicit", "manual"}
     existing_ids = {n["id"] for n in merged.values() if n.get("id")}
     explicit_nodes = store.get_by_source_kind(

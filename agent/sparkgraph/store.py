@@ -61,7 +61,9 @@ class SparkGraphStore:
         now = int(time.time())
         node_id = uuid.uuid4().hex
         validated_count = item.meta.get("validated_count", 0) if item.meta else 0
-        source_sessions = json.dumps(item.meta.get("source_sessions", [])) if item.meta else "[]"
+        # source_sessions：优先从 meta 合并，写入独立列（同时回填 meta，保持一致）
+        sessions_from_meta = item.meta.get("source_sessions", []) if item.meta else []
+        source_sessions = json.dumps(sessions_from_meta)
         self._conn.execute(
             f"""
             INSERT INTO {NODES_TABLE} (
@@ -262,6 +264,9 @@ class SparkGraphStore:
         meta = json.loads(current.get("meta") or "{}")
         if confidence_components is not None:
             meta["confidence_components"] = confidence_components
+        elif confidence_components is None and "confidence_components" in meta:
+            # Explicit None → 清除旧字段，保持 meta 干净
+            del meta["confidence_components"]
         self._conn.execute(
             f"""
             UPDATE {NODES_TABLE}

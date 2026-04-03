@@ -3,6 +3,7 @@ import sqlite3
 
 import pytest
 
+from agent.sparkgraph.db import NODES_TABLE
 from agent.sparkgraph.store import SparkGraphNodeInput, SparkGraphStore
 from agent.sparkgraph.types import EdgeType, NodeStatus, NodeType
 
@@ -101,6 +102,32 @@ def test_get_by_source_kind(tmp_path):
     # Empty kinds returns empty
     results = store.get_by_source_kind([], "proxy")
     assert results == []
+
+
+def test_update_node_scoring_clears_confidence_components(tmp_path):
+    """Passing confidence_components=None removes the key from meta."""
+    store = SparkGraphStore(tmp_path / "sparkgraph" / "default.db")
+    node_id = store.insert_node(
+        SparkGraphNodeInput(
+            type=NodeType.FACT,
+            summary="test node",
+            canonical_key="fact:test-node",
+            source_kind="flush",
+        )
+    )
+    # Manually set old-style meta
+    store.conn.execute(
+        f"UPDATE {NODES_TABLE} SET meta=? WHERE id=?",
+        ('{"confidence_components":{"explicit_bonus":1.0},"old_key":"value"}', node_id),
+    )
+    store.conn.commit()
+
+    # Update scoring with explicit None → should clear confidence_components
+    store.update_node_scoring(node_id, confidence=0.85, status="active", confidence_components=None)
+    node = store.get_node(node_id)
+    meta = json.loads(node["meta"])
+    assert "confidence_components" not in meta
+    assert "old_key" in meta  # unrelated keys preserved
 
 
 def test_default_inject_flag(tmp_path):
