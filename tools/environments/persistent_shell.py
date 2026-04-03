@@ -1,3 +1,4 @@
+from __future__ import annotations
 """Persistent shell mixin: file-based IPC protocol for long-lived bash shells."""
 
 import logging

@@ -1,9 +1,10 @@
-"""SparkGraph tools."""
-
 from __future__ import annotations
+
+"""SparkGraph tools."""
 
 import json
 import re
+import sqlite3
 import unicodedata
 from typing import Any
 
@@ -510,67 +511,125 @@ def sparkgraph_record_tool(
             continue
 
         canonical_key = build_canonical_key(node_type, summary)
-        existing = find_dedup_match(
+        same_type_existing = find_dedup_match(
             store,
             node_type=node_type,
             summary=summary,
             canonical_key=canonical_key,
         )
-        if existing is None and node_type in {NodeType.ISSUE, NodeType.FACT}:
-            existing = find_cross_type_dedup_match(
+        cross_type_existing = None
+        if same_type_existing is None and node_type in {NodeType.ISSUE, NodeType.FACT}:
+            cross_type_existing = find_cross_type_dedup_match(
                 store,
                 node_types=(NodeType.ISSUE, NodeType.FACT),
                 summary=summary,
             )
-        if existing is not None:
-            # 去重命中：来源即命运，重新查表更新 confidence 和 status
-            existing_node = store.get_node(existing.node_id) or {}
-            existing_type_raw = str(existing.node_type or existing_node.get("type") or node_type.value).strip().upper()
+
+        # ── Same-type dedup：exact canonical_key 命中，直接更新 ─────────────
+        if same_type_existing is not None:
+            existing_node = store.get_node(same_type_existing.node_id) or {}
+            existing_type_raw = str(same_type_existing.node_type or existing_node.get("type") or node_type.value).strip().upper()
             try:
                 scoring_type = _normalize_node_type(existing_type_raw)
             except KeyError:
                 scoring_type = node_type
             score_result = initial_score_for(source_kind)
             store.update_node_scoring(
-                existing.node_id,
+                same_type_existing.node_id,
                 confidence=score_result.confidence,
                 status=score_result.initial_status.value,
-                confidence_components=None,  # 清除旧字段，保持 meta 干净
+                confidence_components=None,
             )
-            # 去重命中：validated_count++（知识再次被确认）
-            store.increment_validated_count([existing.node_id])
-            store.merge_source_sessions(existing.node_id, session_id)
+            store.increment_validated_count([same_type_existing.node_id])
+            store.merge_source_sessions(same_type_existing.node_id, session_id)
             if embedding_enabled(embedding_config):
                 try:
-                    current_node = store.get_node(existing.node_id) or {}
+                    current_node = store.get_node(same_type_existing.node_id) or {}
                     embed_text = str(current_node.get("summary") or summary).strip()
                     if embed_text:
                         store.upsert_vector(
-                            node_id=existing.node_id,
+                            node_id=same_type_existing.node_id,
                             content_hash=embedding_content_hash(embed_text),
                             embedding=create_embedding(embed_text, embedding_config),
                         )
                 except Exception:
                     pass
             updated += 1
-            recorded_ids.append(existing.node_id)
-            batch_records.append((existing.node_id, scoring_type, str(existing_node.get("summary") or summary)))
+            recorded_ids.append(same_type_existing.node_id)
+            batch_records.append((same_type_existing.node_id, scoring_type, str(existing_node.get("summary") or summary)))
+            continue
+
+        # ── Cross-type dedup：插入新节点，然后 merge_nodes ──────────────────
+        if cross_type_existing is not None:
+            score_result = initial_score_for(source_kind)
+            new_node_id = store.insert_node(
+                SparkGraphNodeInput(
+                    type=node_type,
+                    summary=summary,
+                    detail=evidence,
+                    canonical_key=canonical_key,
+                    source_kind=source_kind,
+                    status=score_result.initial_status,
+                    confidence=score_result.confidence,
+                    default_inject=source_kind not in {"reflection", "shadow"},
+                    meta={"source_kind": source_kind, "source_sessions": [session_id] if session_id else []},
+                )
+            )
+            # keep = cross_type_existing（已有节点，保留），merge = new_node_id（新节点，合并入 keep）
+            store.merge_nodes(keep_id=cross_type_existing.node_id, merge_id=new_node_id)
+            if embedding_enabled(embedding_config):
+                try:
+                    vector = create_embedding(summary, embedding_config)
+                    store.upsert_vector(
+                        node_id=new_node_id,
+                        content_hash=embedding_content_hash(summary),
+                        embedding=vector,
+                    )
+                except Exception:
+                    pass
+            updated += 1
+            recorded_ids.append(cross_type_existing.node_id)
+            batch_records.append((cross_type_existing.node_id, node_type, summary))
             continue
 
         # 新建节点：来源即命运，直接查表
         score_result = initial_score_for(source_kind)
-        node_id = store.insert_node(
-            SparkGraphNodeInput(
-                type=node_type,
-                summary=summary,
-                canonical_key=canonical_key,
-                source_kind=source_kind,
-                status=score_result.initial_status,
-                confidence=score_result.confidence,
-                default_inject=source_kind not in {"reflection", "shadow"},
-                meta={"source_kind": source_kind, "source_sessions": [session_id] if session_id else []},
+        try:
+            node_id = store.insert_node(
+                SparkGraphNodeInput(
+                    type=node_type,
+                    summary=summary,
+                    canonical_key=canonical_key,
+                    source_kind=source_kind,
+                    status=score_result.initial_status,
+                    confidence=score_result.confidence,
+                    default_inject=source_kind not in {"reflection", "shadow"},
+                    meta={"source_kind": source_kind, "source_sessions": [session_id] if session_id else []},
+                )
             )
-        )
+        except sqlite3.IntegrityError:
+            # Race condition: 并发请求在查重后、插入前之间隙中写入了同一 canonical_key。
+            # 此时已有节点为 keep（保留），新候选为 merge（合并入 keep）。
+            existing_by_key = store.get_node_by_canonical_key(canonical_key, node_type)
+            if existing_by_key:
+                # merge_nodes(keep_id, merge_id)：keep 累加 validated_count，merge deprecated，迁移边。
+                # 这里 merge_id 不存在（插入失败），改为直接更新 keep 节点（等同于 merge_into_keep）。
+                store.update_node_scoring(
+                    existing_by_key["id"],
+                    confidence=score_result.confidence,
+                    status=score_result.initial_status.value,
+                    confidence_components=None,
+                )
+                store.increment_validated_count([existing_by_key["id"]])
+                store.merge_source_sessions(existing_by_key["id"], session_id)
+                recorded_ids.append(existing_by_key["id"])
+                batch_records.append((existing_by_key["id"], node_type, summary))
+                updated += 1
+                continue
+            else:
+                # 无法找到已存在的节点（极不可能），跳过
+                rejected += 1
+                continue
         if embedding_enabled(embedding_config):
             try:
                 vector = create_embedding(summary, embedding_config)

@@ -1,3 +1,4 @@
+from __future__ import annotations
 """Modal cloud execution environment using the Modal SDK directly.
 
 Replaces the previous swe-rex ModalDeployment wrapper with native Modal

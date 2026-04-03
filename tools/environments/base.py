@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Base class for all Hermes execution environment backends."""
 
 from abc import ABC, abstractmethod

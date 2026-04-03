@@ -1,3 +1,4 @@
+from __future__ import annotations
 """Singularity/Apptainer persistent container environment.
 
 Security-hardened with --containall, --no-home, capability dropping.

@@ -1,3 +1,4 @@
+from __future__ import annotations
 #!/usr/bin/env python3
 """File Tools Module - LLM agent file manipulation tools."""
 

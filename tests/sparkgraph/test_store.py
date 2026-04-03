@@ -265,6 +265,54 @@ def test_merge_source_sessions(tmp_path):
     store.merge_source_sessions("nonexistent-id", "session-gamma")
 
 
+
+def test_get_node_by_canonical_key(tmp_path):
+    """get_node_by_canonical_key 精确查找（用于 IntegrityError 恢复路径）。"""
+    store = SparkGraphStore(tmp_path / "sparkgraph" / "default.db")
+
+    nid = store.insert_node(SparkGraphNodeInput(
+        type=NodeType.ISSUE,
+        summary="pg_hba.conf misconfigured",
+        canonical_key="issue:pg-hba-conf",
+        source_kind="flush",
+    ))
+
+    # Found
+    node = store.get_node_by_canonical_key("issue:pg-hba-conf", NodeType.ISSUE)
+    assert node is not None
+    assert node["id"] == nid
+    assert node["type"] == NodeType.ISSUE.value
+
+    # Wrong type — not found (canonical_key is type-qualified)
+    node_wrong_type = store.get_node_by_canonical_key("issue:pg-hba-conf", NodeType.FACT)
+    assert node_wrong_type is None
+
+    # Non-existent key — not found
+    node_missing = store.get_node_by_canonical_key("issue:does-not-exist", NodeType.ISSUE)
+    assert node_missing is None
+
+
+def test_merge_nodes_accumulates_validated_count(tmp_path):
+    """merge_nodes keep 节点累加 merge 节点的 validated_count。"""
+    store = SparkGraphStore(tmp_path / "sparkgraph" / "default.db")
+
+    keep_id = store.insert_node(SparkGraphNodeInput(
+        type=NodeType.FACT, summary="keep",
+        canonical_key="fact:keep-vc", source_kind="flush",
+        meta={"validated_count": 3},
+    ))
+    merge_id = store.insert_node(SparkGraphNodeInput(
+        type=NodeType.FACT, summary="merge",
+        canonical_key="fact:merge-vc", source_kind="manual",
+        meta={"validated_count": 2},
+    ))
+
+    store.merge_nodes(keep_id=keep_id, merge_id=merge_id)
+
+    keep = store.get_node(keep_id)
+    assert keep["validated_count"] == 5, "validated_count should be 3+2=5"
+
+
 def test_search_nodes_uses_fts_sync(tmp_path):
     store = SparkGraphStore(tmp_path / "sparkgraph" / "default.db")
     store.insert_node(
@@ -377,7 +425,6 @@ def test_vector_round_trip(tmp_path):
     assert vector is not None
     assert vector["content_hash"] == "hash-1"
     assert vector["embedding"] == pytest.approx([0.25, 0.5, 0.75], rel=1e-6)
-    assert store.count_vectors() == 1
 
 
 def test_list_nodes_missing_vectors(tmp_path):

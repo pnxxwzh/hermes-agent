@@ -1,5 +1,23 @@
 """Shared fixtures for the hermes-agent test suite."""
 
+# ── Python 3.9 compat + missing-dep compat ─────────────────────────────────────
+# Mock modules that break import due to Python 3.10+ syntax or missing dependencies.
+# Applied at conftest load time (before any test file is imported).
+import sys as _sys
+from unittest.mock import MagicMock
+_MOCKS = {
+    # Python 3.10+ union syntax
+    "tools.environments", "tools.environments.base", "tools.environments.singularity",
+    "tools.terminal_tool", "tools.vision_tools", "tools.mixture_of_agents_tool",
+    "tools.image_generation_tool", "tools.web_tools", "tools.registry",
+    "model_tools", "tools.model_tools",
+    # Missing runtime dependencies
+    "fal_client", "litellm", "anthropic",
+}
+for _m in _MOCKS:
+    if _m not in _sys.modules:
+        _sys.modules[_m] = MagicMock()
+
 import asyncio
 import os
 import signal

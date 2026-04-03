@@ -128,6 +128,14 @@ class SparkGraphStore:
         ).fetchone()
         return dict(row) if row else None
 
+    def get_node_by_canonical_key(self, canonical_key: str, node_type: NodeType):
+        """通过 canonical_key + type 精确查找节点（用于 IntegrityError 恢复路径）。"""
+        row = self._conn.execute(
+            f"SELECT * FROM {NODES_TABLE} WHERE canonical_key = ? AND type = ? LIMIT 1",
+            (canonical_key, node_type.value),
+        ).fetchone()
+        return dict(row) if row else None
+
     def increment_validated_count(self, node_ids: list[str], *, now_ts: int | None = None) -> None:
         """命中的节点 validated_count++。recall_hits 已删除（与 validated_count 冗余）。"""
         if not node_ids:
@@ -224,18 +232,6 @@ class SparkGraphStore:
             sql += " WHERE status = ?"
             params.append(status)
         row = self._conn.execute(sql, tuple(params)).fetchone()
-        return int(row["count"]) if row else 0
-
-    def count_evidence_rows(self) -> int:
-        row = self._conn.execute(
-            f"SELECT COUNT(*) AS count FROM {EVIDENCE_TABLE}"
-        ).fetchone()
-        return int(row["count"]) if row else 0
-
-    def count_vectors(self) -> int:
-        row = self._conn.execute(
-            f"SELECT COUNT(*) AS count FROM {VECTORS_TABLE}"
-        ).fetchone()
         return int(row["count"]) if row else 0
 
     def count_nodes_by_type(self) -> dict[str, int]:

@@ -105,12 +105,3 @@ def _trim_to_fit(lines: list[str], max_chars: int) -> list[str]:
         lines.pop()
     return lines
 
-
-def format_recall_block(
-    nodes: list[dict],
-    *,
-    edges: list[dict[str, Any]] | None = None,
-    max_chars: int = 1800,
-) -> str:
-    block, _ = build_recall_payload(nodes, edges=edges, max_chars=max_chars)
-    return block

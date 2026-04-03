@@ -1,3 +1,4 @@
+from __future__ import annotations
 """Local execution environment with interrupt support and non-blocking I/O."""
 
 import glob

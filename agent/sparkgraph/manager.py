@@ -44,7 +44,7 @@ class SparkGraphManager:
         max_chars: int | None = None,
     ) -> tuple[str, int]:
         if not self.config.recall.enabled:
-            return ""
+            return "", 0
         store = self.ensure_store()
         recall_cfg = self.config.recall
         nodes, edges, token_estimate = recall_nodes(
