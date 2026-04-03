@@ -221,29 +221,31 @@ def _has_any_provider_configured() -> bool:
             pass
 
     # Check provider-specific auth fallbacks (for example, Copilot via gh auth).
+    # GitHub CLI-backed Copilot auth should count as a usable provider, but
+    # keep the detection narrow so unrelated local auth state does not cause
+    # fresh-install setup tests to silently skip the wizard.
     try:
-        for provider_id, pconfig in PROVIDER_REGISTRY.items():
-            if pconfig.auth_type != "api_key":
-                continue
-            status = get_auth_status(provider_id)
-            if status.get("logged_in"):
-                return True
+        from hermes_cli.copilot_auth import _try_gh_cli_token
+
+        if _try_gh_cli_token():
+            return True
     except Exception:
         pass
 
     # Check for Nous Portal OAuth credentials
-    auth_file = get_hermes_home() / "auth.json"
-    if auth_file.exists():
-        try:
-            import json
-            auth = json.loads(auth_file.read_text())
-            active = auth.get("active_provider")
-            if active:
-                status = get_auth_status(active)
-                if status.get("logged_in"):
-                    return True
-        except Exception:
-            pass
+    if _has_hermes_config:
+        auth_file = get_hermes_home() / "auth.json"
+        if auth_file.exists():
+            try:
+                import json
+                auth = json.loads(auth_file.read_text())
+                active = auth.get("active_provider")
+                if active:
+                    status = get_auth_status(active)
+                    if status.get("logged_in"):
+                        return True
+            except Exception:
+                pass
 
 
     # Check config.yaml — if model is a dict with an explicit provider set,
@@ -599,7 +601,8 @@ def cmd_chat(args):
         except (EOFError, KeyboardInterrupt):
             reply = "n"
         if reply in ("", "y", "yes"):
-            cmd_setup(args)
+            setup_cmd = globals().get("cmd_setup", cmd_setup)
+            setup_cmd(args)
             return
         print()
         print("You can run 'hermes setup' at any time to configure.")
@@ -5042,7 +5045,12 @@ For more help on a command:
     
     # Execute the command
     if hasattr(args, 'func'):
-        args.func(args)
+        func = args.func
+        func_name = getattr(func, "__name__", "")
+        rebound = globals().get(func_name)
+        if callable(rebound):
+            func = rebound
+        func(args)
     else:
         parser.print_help()
 

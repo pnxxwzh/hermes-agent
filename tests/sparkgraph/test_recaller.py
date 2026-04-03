@@ -368,6 +368,64 @@ def test_recall_nodes_can_use_embedding_when_fts_misses(tmp_path, monkeypatch):
     assert [node["id"] for node in nodes] == [redis_id]
 
 
+def test_recall_nodes_skip_low_signal_greeting_queries(tmp_path):
+    store = SparkGraphStore(tmp_path / "sparkgraph" / "default.db")
+    _insert_active_node(
+        store,
+        node_type=NodeType.FACT,
+        summary="User greeted with hallo during onboarding",
+        canonical_key="fact:user-hallo-onboarding",
+    )
+
+    nodes = recall_nodes(store, query="hallo", config=RecallConfig(max_nodes=4))
+    assert nodes == []
+
+
+def test_recall_nodes_rank_vector_hits_by_similarity_before_recency(tmp_path, monkeypatch):
+    store = SparkGraphStore(tmp_path / "sparkgraph" / "default.db")
+    strong_id = _insert_active_node(
+        store,
+        node_type=NodeType.ISSUE,
+        summary="Redis remote access checks bind protected mode and port mapping",
+        canonical_key="issue:redis-remote-access",
+    )
+    weak_id = _insert_active_node(
+        store,
+        node_type=NodeType.ISSUE,
+        summary="Generic recent note that should not outrank the better semantic hit",
+        canonical_key="issue:generic-recent-note",
+        confidence=0.95,
+        stability=0.95,
+        reuse_score=0.95,
+    )
+    store.upsert_vector(node_id=strong_id, content_hash="strong", embedding=[0.95, 0.05, 0.0])
+    store.upsert_vector(node_id=weak_id, content_hash="weak", embedding=[0.58, 0.42, 0.0])
+
+    store.conn.execute("UPDATE sg_nodes SET updated_at = ? WHERE id = ?", (1, strong_id))
+    store.conn.execute("UPDATE sg_nodes SET updated_at = ? WHERE id = ?", (999999999, weak_id))
+    store.conn.commit()
+
+    monkeypatch.setattr(
+        "agent.sparkgraph.recaller.create_embedding",
+        lambda *args, **kwargs: [1.0, 0.0, 0.0],
+    )
+
+    nodes = recall_nodes(
+        store,
+        query="redis remote clients cannot connect",
+        config=RecallConfig(max_nodes=2, search_limit=2, vector_limit=2, related_limit=0),
+        embedding_config=SparkGraphEmbeddingConfig(
+            provider="openai-compatible",
+            model="test-embedding",
+            base_url="http://localhost:8000/v1",
+            api_key="test-key",
+            timeout=5,
+        ),
+    )
+
+    assert [node["id"] for node in nodes[:2]] == [strong_id, weak_id]
+
+
 def test_flush_maintenance_backfills_missing_vectors(tmp_path, monkeypatch):
     store = SparkGraphStore(tmp_path / "sparkgraph" / "default.db")
     redis_id = _insert_active_node(

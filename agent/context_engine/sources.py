@@ -12,34 +12,20 @@ from __future__ import annotations
 
 from typing import Literal
 
+from agent.prompt_builder import (
+    MEMORY_GUIDANCE,
+    SESSION_SEARCH_GUIDANCE,
+    SKILLS_GUIDANCE,
+    TOOL_USE_ENFORCEMENT_GUIDANCE,
+    TOOL_USE_ENFORCEMENT_MODELS,
+)
+
 from agent.context_engine.compat import (
     wrap_honcho_static_block,
     wrap_load_soul_md,
 )
 from agent.context_engine.context import AssemblyContext
 from agent.context_engine.models import ContextChunk
-
-# ---------------------------------------------------------------------------
-# Constants (duplicated from run_agent.py for source independence)
-# ---------------------------------------------------------------------------
-
-MEMORY_GUIDANCE = (
-    "You have access to a persistent memory system. Use the memory tool "
-    "to store important information between sessions."
-)
-SESSION_SEARCH_GUIDANCE = (
-    "Before answering factual questions, consider using session_search "
-    "to find relevant past conversations."
-)
-SKILLS_GUIDANCE = (
-    "When attempting tasks, check if a relevant skill exists using skills_list. "
-    "Skills can provide step-by-step guidance for complex tasks."
-)
-TOOL_USE_ENFORCEMENT_GUIDANCE = (
-    "You must actually call tools rather than describing intended actions. "
-    "Every time you say you will do something, you must call a tool to do it."
-)
-TOOL_USE_ENFORCEMENT_MODELS = ("gpt-4", "gpt-4o", "gpt-4-turbo", "gpt-3.5")
 
 
 # ---------------------------------------------------------------------------
@@ -96,13 +82,55 @@ class ToolGuidanceSource:
     name = "tool_guidance"
     stage: Literal["stable"] = "stable"
 
-    def __init__(self, valid_tool_names: list[str] = None):
+    def __init__(
+        self,
+        valid_tool_names: list[str] = None,
+        preserve_legacy_memory_guidance: bool = False,
+    ):
         self._tool_names = valid_tool_names or []
+        self._preserve_legacy_memory_guidance = preserve_legacy_memory_guidance
+
+    def _build_memory_guidance(self) -> str:
+        if self._preserve_legacy_memory_guidance:
+            return MEMORY_GUIDANCE
+
+        has_session_search = "session_search" in self._tool_names
+        has_skill_tool = (
+            "skill_manage" in self._tool_names or "skills_list" in self._tool_names
+        )
+
+        parts = [
+            "You have persistent memory across sessions. Save durable facts using the memory "
+            "tool: user preferences, environment details, tool quirks, and stable conventions. "
+            "Memory is injected into every turn, so keep it compact and focused on facts that "
+            "will still matter later.\n"
+            "Prioritize what reduces future user steering — the most valuable memory is one "
+            "that prevents the user from having to correct or remind you again. "
+            "User preferences and recurring corrections matter more than procedural task details.\n"
+        ]
+
+        progress_guidance = (
+            "Do NOT save task progress, session outcomes, completed-work logs, or temporary TODO "
+            "state to memory;"
+        )
+        if has_session_search:
+            progress_guidance += " use session_search to recall those from past transcripts."
+        else:
+            progress_guidance += " keep memory focused on durable facts instead."
+        parts.append(progress_guidance)
+
+        if has_skill_tool:
+            parts.append(
+                "If you've discovered a new way to do something, solved a problem that could be "
+                "necessary later, save it as a skill with the skill tool."
+            )
+
+        return " ".join(parts)
 
     def collect(self, ctx: AssemblyContext) -> list[ContextChunk]:
         parts: list[str] = []
         if "memory" in self._tool_names:
-            parts.append(MEMORY_GUIDANCE)
+            parts.append(self._build_memory_guidance())
         if "session_search" in self._tool_names:
             parts.append(SESSION_SEARCH_GUIDANCE)
         if "skill_manage" in self._tool_names or "skills_list" in self._tool_names:
@@ -135,9 +163,11 @@ class ToolUseEnforcementSource:
         self,
         tool_use_enforcement,  # True/False/"auto"/list or None
         model: str | None = None,
+        has_tools: bool = True,
     ):
         self._enforce = tool_use_enforcement
         self._model = model or ""
+        self._has_tools = has_tools
 
     def _should_inject(self) -> bool:
         enf = self._enforce
@@ -156,6 +186,8 @@ class ToolUseEnforcementSource:
         return any(p in model_lower for p in TOOL_USE_ENFORCEMENT_MODELS)
 
     def collect(self, ctx: AssemblyContext) -> list[ContextChunk]:
+        if not self._has_tools:
+            return []
         if not self._should_inject():
             return []
         return [ContextChunk(
@@ -218,7 +250,7 @@ class SystemMessageSource:
         self._message = system_message
 
     def collect(self, ctx: AssemblyContext) -> list[ContextChunk]:
-        content = self._message or ""
+        content = self._message if self._message is not None else (ctx.system_message or "")
         if not content:
             return []
         return [ContextChunk(

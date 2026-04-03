@@ -1407,16 +1407,21 @@ class HermesCLI:
     def _status_bar_display_width(text: str) -> int:
         """Return terminal cell width for status-bar text.
 
-        len() is not enough for prompt_toolkit layout decisions because some
-        glyphs can render wider than one Python codepoint. Keeping the status
-        bar within the real display width prevents it from wrapping onto a
-        second line and leaving behind duplicate rows.
+        Strips ANSI color codes (e.g. [green]...[/]) before measuring,
+        since get_cwidth counts them as literal characters.
         """
         try:
+            import re
             from prompt_toolkit.utils import get_cwidth
-            return get_cwidth(text or "")
         except Exception:
             return len(text or "")
+
+        # Strip ANSI color codes iteratively: [colorname]...[/color]
+        prev = None
+        while prev != text:
+            prev = text
+            text = re.sub(r'\[/?[^\]]*\]', '', text)
+        return get_cwidth(text or "")
 
     @classmethod
     def _trim_status_bar_text(cls, text: str, max_width: int) -> str:
@@ -1527,29 +1532,45 @@ class HermesCLI:
                         context_label = "ctx --"
 
                     bar_style = self._status_bar_context_style(percent)
-                    frags = [
-                        ("class:status-bar", " ⚕ "),
-                        ("class:status-bar-strong", snapshot["model_short"]),
-                        ("class:status-bar-dim", " │ "),
-                        ("class:status-bar-dim", context_label),
-                        ("class:status-bar-dim", " │ "),
-                        (bar_style, self._build_context_bar(percent)),
-                        ("class:status-bar-dim", " "),
-                        (bar_style, percent_label),
-                        ("class:status-bar-dim", " │ "),
-                        ("class:status-bar-dim", duration_label),
-                    ]
+                    context_bar = self._build_context_bar(percent)
 
-                    # Phase 2: append source breakdown bar when enabled and terminal is wide
-                    if self._show_context_breakdown and width >= 90:
-                        source_metrics = self._get_current_context_metrics()
-                        source_bar_width = min(width - 52, 30)
-                        source_bar = self._render_source_bar(source_metrics, width=source_bar_width)
-                        if source_bar:
-                            frags.append(("class:status-bar-dim", " │ "))
-                            frags.append((bar_style, source_bar))
+                    # Phase 2: get source proportion label for enriched display
+                    source_metrics = self._get_current_context_metrics()
+                    source_label = ""
+                    if self._show_context_breakdown and source_metrics:
+                        source_label = self._render_source_bar(source_metrics, width=30)
+                    if source_label:
+                        # Replace plain percent_label with enriched one: "25% (mem:80% id:15%)"
+                        enriched_label = f"{percent_label} ({source_label})"
+                        frags = [
+                            ("class:status-bar", " ⚕ "),
+                            ("class:status-bar-strong", snapshot["model_short"]),
+                            ("class:status-bar-dim", " │ "),
+                            ("class:status-bar-dim", context_label),
+                            ("class:status-bar-dim", " │ "),
+                            (bar_style, context_bar),
+                            ("class:status-bar-dim", " "),
+                            (bar_style, enriched_label),
+                            ("class:status-bar-dim", " │ "),
+                            ("class:status-bar-dim", duration_label),
+                            ("class:status-bar", " "),
+                        ]
+                    else:
+                        frags = [
+                            ("class:status-bar", " ⚕ "),
+                            ("class:status-bar-strong", snapshot["model_short"]),
+                            ("class:status-bar-dim", " │ "),
+                            ("class:status-bar-dim", context_label),
+                            ("class:status-bar-dim", " │ "),
+                            (bar_style, context_bar),
+                            ("class:status-bar-dim", " "),
+                            (bar_style, percent_label),
+                            ("class:status-bar-dim", " │ "),
+                            ("class:status-bar-dim", duration_label),
+                            ("class:status-bar", " "),
+                        ]
 
-                    frags.append(("class:status-bar", " "))
+            total_width = sum(self._status_bar_display_width(text) for _, text in frags)
             if total_width > width:
                 plain_text = "".join(text for _, text in frags)
                 trimmed = self._trim_status_bar_text(plain_text, width)
@@ -1570,11 +1591,20 @@ class HermesCLI:
         if not metrics or not hasattr(metrics, "by_source") or not metrics.by_source:
             return ""
 
-        lines = []
+        aggregated = {}
         for sm in metrics.by_source:
-            color = _SOURCE_COLORS.get(sm.source, "white")
-            label = _SOURCE_LABELS.get(sm.source, sm.source)
-            lines.append(f"  [{color}]{label}[/{color}]: {sm.rough_tokens:,} tok ({sm.char_count:,} char)")
+            bucket = aggregated.setdefault(sm.source, {"rough_tokens": 0, "char_count": 0})
+            bucket["rough_tokens"] += sm.rough_tokens
+            bucket["char_count"] += sm.char_count
+
+        lines = []
+        for source, totals in aggregated.items():
+            color = _SOURCE_COLORS.get(source, "white")
+            label = _SOURCE_LABELS.get(source, source)
+            lines.append(
+                f"  [{color}]{label}[/{color}]: "
+                f"{totals['rough_tokens']:,} tok ({totals['char_count']:,} char)"
+            )
 
         return "\n".join(lines)
 
@@ -1586,44 +1616,53 @@ class HermesCLI:
         return getattr(agent, "_last_context_metrics", None)
 
     def _render_source_bar(self, metrics, width: int = 20) -> str:
+        """Render a source proportion summary for status bar label.
+
+        Returns a compact label like "memory:80% identity:15% other:5%" or empty string.
+        Does NOT render colored bars — those come from _build_context_bar via CSS.
+        """
         if not metrics or not hasattr(metrics, "by_source"):
             return ""
         if not metrics.by_source or metrics.total_estimated_tokens == 0:
             return ""
 
-        # Build segments
-        segments = []
+        aggregated = {}
         for sm in metrics.by_source:
-            proportion = sm.rough_tokens / metrics.total_estimated_tokens
-            color = _SOURCE_COLORS.get(sm.source, "white")
-            segments.append({
-                "source": _SOURCE_LABELS.get(sm.source, sm.source),
-                "tokens": sm.rough_tokens,
-                "proportion": proportion,
-                "color": color,
-            })
+            bucket = aggregated.setdefault(sm.source, {"tokens": 0})
+            bucket["tokens"] += sm.rough_tokens
 
-        # Sort by proportion descending, merge < 5% into "other"
+        segments = []
+        for source, totals in aggregated.items():
+            proportion = totals["tokens"] / metrics.total_estimated_tokens
+            segments.append(
+                {
+                    "source": _SOURCE_LABELS.get(source, source),
+                    "tokens": totals["tokens"],
+                    "proportion": proportion,
+                }
+            )
+
         segments.sort(key=lambda x: x["proportion"], reverse=True)
-        primary = [s for s in segments if s["proportion"] >= 0.05]
-        small = segments[len(primary):]
+
+        # Top 3 + "other" if needed
+        primary = segments[:3]
+        small = segments[3:]
         if small:
             total_small = sum(s["proportion"] for s in small)
             primary.append({
                 "source": "other",
                 "tokens": sum(s["tokens"] for s in small),
                 "proportion": total_small,
-                "color": "bright_black",
             })
 
-        # Render bar
-        bar_parts = []
+        # Build compact label: "mem:80% id:15% sk:5%"
+        parts = []
         for seg in primary:
-            filled = int(seg["proportion"] * width)
-            bar_parts.append(f"[{seg['color']}]{'█' * filled}[/]")
+            pct = int(seg["proportion"] * 100)
+            if pct > 0:
+                parts.append(f"{seg['source']}:{pct}%")
 
-        bar_str = "".join(bar_parts)
-        return f"[{bar_str}] {metrics.total_estimated_tokens:,} tok"
+        return " ".join(parts)
 
     def _normalize_model_for_provider(self, resolved_provider: str) -> bool:
         """Normalize provider-specific model IDs and routing."""

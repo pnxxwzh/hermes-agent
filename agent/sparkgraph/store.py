@@ -311,11 +311,11 @@ class SparkGraphStore:
         try:
             rows = self._conn.execute(
                 f"""
-                SELECT n.*
-                FROM {NODES_FTS_TABLE} f
-                JOIN {NODES_TABLE} n ON n.rowid = f.rowid
+                SELECT n.*, bm25({NODES_FTS_TABLE}) AS fts_rank
+                FROM {NODES_FTS_TABLE}
+                JOIN {NODES_TABLE} n ON n.rowid = {NODES_FTS_TABLE}.rowid
                 WHERE {" AND ".join(where_parts)}
-                ORDER BY n.updated_at DESC
+                ORDER BY fts_rank ASC, n.updated_at DESC
                 LIMIT ?
                 """,
                 tuple(params),

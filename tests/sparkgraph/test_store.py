@@ -69,6 +69,35 @@ def test_search_nodes_uses_fts_sync(tmp_path):
     assert matches[0]["type"] == "ISSUE"
 
 
+def test_search_nodes_prefers_fts_relevance_before_recency(tmp_path):
+    store = SparkGraphStore(tmp_path / "sparkgraph" / "default.db")
+    exact_id = store.insert_node(
+        SparkGraphNodeInput(
+            type=NodeType.ISSUE,
+            summary="redis remote access troubleshooting",
+            canonical_key="issue:redis-remote-access",
+            source_kind="flush",
+        )
+    )
+    partial_id = store.insert_node(
+        SparkGraphNodeInput(
+            type=NodeType.ISSUE,
+            summary=(
+                "redis remote access note with a lot of extra filler words that make "
+                "this match noisier than the concise troubleshooting summary"
+            ),
+            canonical_key="issue:redis-troubleshooting-note",
+            source_kind="flush",
+        )
+    )
+    store.conn.execute("UPDATE sg_nodes SET updated_at = ? WHERE id = ?", (1, exact_id))
+    store.conn.execute("UPDATE sg_nodes SET updated_at = ? WHERE id = ?", (999999999, partial_id))
+    store.conn.commit()
+
+    matches = store.search_nodes("redis remote access", limit=2)
+    assert [match["id"] for match in matches[:2]] == [exact_id, partial_id]
+
+
 def test_search_nodes_sanitizes_punctuation_heavy_query(tmp_path):
     store = SparkGraphStore(tmp_path / "sparkgraph" / "default.db")
     store.insert_node(

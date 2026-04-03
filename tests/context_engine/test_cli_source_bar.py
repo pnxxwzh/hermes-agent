@@ -79,26 +79,25 @@ class TestRenderSourceBar:
         assert cli._render_source_bar(metrics) == ""
 
     def test_render_source_bar_small_sources_merged(self):
-        """T13.6: <5% sources merged into 'other'."""
+        """T13.6: 4th+ source merged into 'other'."""
         cli = self._make_cli()
-        # 1% + 1% + 1% = 3% < 5% threshold
+        # 4 sources: 3 large enough, 1 merged into other
         metrics = MockContextMetrics(
             [
                 MockSourceMetrics("memory", 10, 40),
                 MockSourceMetrics("identity", 10, 40),
                 MockSourceMetrics("time_platform", 10, 40),
+                MockSourceMetrics("skills", 970, 4000),
             ],
-            total_estimated_tokens=1000,  # 10/1000 = 1%
+            total_estimated_tokens=1000,
         )
         result = cli._render_source_bar(metrics)
-        # All < 5% -> merged into "other" which shows bright_black color
-        # Note: "other" label does not appear in bar output text (no source names in bar)
-        # The bar still renders with bright_black segments
-        assert "bright_black" in result
-        assert "green" not in result  # memory color not present
+        # Top 3: skills:97%, memory:1%, identity:1% -> "other:1%" for time_platform
+        assert "skills:97%" in result
+        assert "other:1%" in result
 
     def test_render_source_bar_proportion_sum(self):
-        """T13.7: all segment proportions sum <= 1."""
+        """T13.7: returns compact label with source proportions."""
         cli = self._make_cli()
         metrics = MockContextMetrics(
             [
@@ -109,11 +108,12 @@ class TestRenderSourceBar:
             total_estimated_tokens=175,
         )
         result = cli._render_source_bar(metrics)
-        # Should not raise, and should contain the bar characters
-        assert "█" in result
+        assert "identity:57%" in result
+        assert "memory:28%" in result
+        assert "skills:14%" in result
 
     def test_render_source_bar_proportion_order(self):
-        """T13.x: bar segments are sorted by proportion descending (largest first)."""
+        """T13.x: top 3 sources shown in descending proportion order."""
         cli = self._make_cli()
         metrics = MockContextMetrics(
             [
@@ -124,68 +124,71 @@ class TestRenderSourceBar:
             total_estimated_tokens=125,
         )
         result = cli._render_source_bar(metrics)
-        # identity has 80% -> bright_blue (16 chars), skills has 16% -> yellow (3 chars)
-        # The bar has 20 chars total: first segment is identity (bright_blue)
-        assert "[bright_blue]" in result  # identity is largest, appears first
+        assert "identity:80%" in result
+        assert "skills:16%" in result
+        assert "memory:4%" in result
 
     def test_render_source_bar_proportion_sum_with_other(self):
-        """T13.x: primary segments + other sum to approximately 1."""
+        """T13.x: 4th+ sources merged into other."""
         cli = self._make_cli()
-        # Small sources: 2% + 2% + 1% = 5%
         metrics = MockContextMetrics(
             [
-                MockSourceMetrics("memory", 20, 80),
+                MockSourceMetrics("memory", 200, 800),
                 MockSourceMetrics("time_platform", 20, 80),
-                MockSourceMetrics("identity", 10, 40),
+                MockSourceMetrics("identity", 500, 2000),
             ],
-            total_estimated_tokens=1000,  # small sources = 5%
+            total_estimated_tokens=1000,
         )
         result = cli._render_source_bar(metrics)
-        # Total should be represented (primary + other)
-        assert "█" in result
+        assert "identity:50%" in result
+        assert "memory:20%" in result
 
     def test_render_source_bar_unknown_source_color(self):
-        """T13.9: unknown source gets default 'white' color."""
+        """T13.9: unknown source keeps its source name in label."""
         cli = self._make_cli()
-        # Unknown source type — should use 'white' as default color
         unknown_metrics = MockContextMetrics(
             [MockSourceMetrics("unknown_source", 50, 200)],
             total_estimated_tokens=50,
         )
-        # Should not raise and should use 'white' as default color
         result = cli._render_source_bar(unknown_metrics)
-        assert "[white]" in result  # default color is white
-        assert "unknown_source" not in result  # source label not in bar output
+        assert "unknown_source:100%" in result
 
     def test_render_bar_width_fixed(self):
-        """T13.10: bar width is fixed at 20 regardless of input."""
+        """T13.10: width param does not affect label output (label has no bar)."""
         cli = self._make_cli()
-        metrics1 = MockContextMetrics(
-            [MockSourceMetrics("identity", 1, 4)],
-            total_estimated_tokens=1,
-        )
-        metrics2 = MockContextMetrics(
+        metrics = MockContextMetrics(
             [MockSourceMetrics("identity", 1000, 4000)],
             total_estimated_tokens=1000,
         )
-        result1 = cli._render_source_bar(metrics1, width=20)
-        result2 = cli._render_source_bar(metrics2, width=20)
-        # Both should have bar chars but at different densities
-        bar1_count = result1.count("█")
-        bar2_count = result2.count("█")
-        # Width is 20, so max bars is 20
-        assert bar1_count <= 20
-        assert bar2_count <= 20
+        result1 = cli._render_source_bar(metrics, width=20)
+        result2 = cli._render_source_bar(metrics, width=30)
+        # Label doesn't use width parameter
+        assert result1 == result2 == "identity:100%"
 
     def test_render_source_bar_contains_tokens(self):
-        """T13.x: result contains total token count."""
+        """T13.x: result contains source proportions as percentages."""
         cli = self._make_cli()
         metrics = MockContextMetrics(
             [MockSourceMetrics("identity", 50, 200)],
             total_estimated_tokens=50,
         )
         result = cli._render_source_bar(metrics)
-        assert "50 tok" in result
+        assert "identity:100%" in result
+
+    def test_render_source_bar_aggregates_duplicate_sources(self):
+        """T13.x: multiple chunks from the same source are aggregated once."""
+        cli = self._make_cli()
+        metrics = MockContextMetrics(
+            [
+                MockSourceMetrics("memory", 40, 160),
+                MockSourceMetrics("memory", 10, 40),
+                MockSourceMetrics("identity", 50, 200),
+            ],
+            total_estimated_tokens=100,
+        )
+        result = cli._render_source_bar(metrics)
+        assert result.count("memory:50%") == 1
+        assert "identity:50%" in result
 
 
 class TestRenderContextBreakdown:
@@ -233,6 +236,21 @@ class TestRenderContextBreakdown:
         result = cli._render_context_breakdown(metrics)
         assert "[green]" in result
         assert "[/green]" in result
+
+    def test_render_context_breakdown_aggregates_duplicate_sources(self):
+        """T13.x: duplicate source chunks are rendered as one aggregated line."""
+        cli = self._make_cli()
+        metrics = MockContextMetrics(
+            [
+                MockSourceMetrics("memory", 5, 20),
+                MockSourceMetrics("memory", 7, 28),
+            ],
+            total_estimated_tokens=12,
+        )
+        result = cli._render_context_breakdown(metrics)
+        assert result.count("memory") == 1
+        assert "12" in result
+        assert "48" in result
 
 
 class TestPhase2Features:
@@ -283,28 +301,24 @@ class TestPhase2Features:
         assert cli._get_current_context_metrics() is mock_metrics
 
     def test_render_source_bar_width_affects_output(self):
-        """T14.5: bar width affects filled character count."""
+        """T14.5: width param is accepted without error (used for future bar rendering)."""
         cli = self._make_cli()
         metrics = MockContextMetrics(
             [MockSourceMetrics("identity", 100, 400)],
             total_estimated_tokens=100,
         )
-        # At 100% proportion, width=20 -> 20 █ chars, width=10 -> 10
-        result_20 = cli._render_source_bar(metrics, width=20)
-        result_10 = cli._render_source_bar(metrics, width=10)
-        assert result_20.count("█") == 20
-        assert result_10.count("█") == 10
+        # Width parameter is accepted; label format is independent of width
+        result = cli._render_source_bar(metrics, width=20)
+        assert "identity:100%" in result
+        assert "█" not in result  # no block characters in new label format
 
     def test_render_source_bar_adaptive_width_param(self):
-        """T14.6: width parameter is used when passed explicitly."""
+        """T14.6: label shows source proportions as percentages."""
         cli = self._make_cli()
         metrics = MockContextMetrics(
             [MockSourceMetrics("memory", 25, 100)],
             total_estimated_tokens=100,
         )
-        # memory=25%, width=20 -> 5 █ chars
+        # memory=25% -> "memory:25%" label
         result = cli._render_source_bar(metrics, width=20)
-        # 25% of 20 = 5 filled characters
-        assert result.count("█") == 5
-        # token count shown instead of meaningless percentage
-        assert "100 tok" in result
+        assert "memory:25%" in result

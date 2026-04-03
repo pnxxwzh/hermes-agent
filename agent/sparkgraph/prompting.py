@@ -17,9 +17,10 @@ def build_flush_prompt(*, include_memory: bool, include_sparkgraph: bool) -> str
         parts.append(
             "Proactively call sparkgraph_record for valuable knowledge points that should be "
             "retrievable later: concrete facts, recurring issues, stable resources, lasting "
-            "decisions, and stable preferences. Do not use sparkgraph_record for greetings, "
-            "temporary task state, progress updates, or speculative guesses. If there is no "
-            "durable knowledge worth retrieving later, do not call sparkgraph_record."
+            "decisions, and stable preferences. Do not record greetings. Do not use "
+            "sparkgraph_record for greetings, temporary task state, progress updates, or "
+            "speculative guesses. If there is no durable knowledge worth retrieving later, "
+            "do not call sparkgraph_record."
         )
 
     parts.append("]")

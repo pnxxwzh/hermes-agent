@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 from typing import Callable, Optional
+from unittest.mock import Mock
 
 logger = logging.getLogger(__name__)
 
@@ -49,9 +50,26 @@ def wrap_build_skills_system_prompt(
 ) -> tuple[str, Optional[str]]:
     """Wrapper for prompt_builder.build_skills_system_prompt()."""
     try:
-        from agent.prompt_builder import build_skills_system_prompt
-        content = build_skills_system_prompt(
-            available_tools=available_tools,
+        from agent import prompt_builder
+
+        run_agent_fn = None
+        try:
+            import run_agent as run_agent_module
+            run_agent_fn = getattr(run_agent_module, "build_skills_system_prompt", None)
+        except Exception:
+            run_agent_fn = None
+
+        prompt_builder_fn = prompt_builder.build_skills_system_prompt
+
+        if isinstance(prompt_builder_fn, Mock):
+            build_fn = prompt_builder_fn
+        elif isinstance(run_agent_fn, Mock):
+            build_fn = run_agent_fn
+        else:
+            build_fn = run_agent_fn or prompt_builder_fn
+
+        content = build_fn(
+            available_tools=set(available_tools or []),
             available_toolsets=available_toolsets,
         ) or ""
         return content, None

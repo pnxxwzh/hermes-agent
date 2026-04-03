@@ -43,16 +43,21 @@ def _identity_factory(ctx: AssemblyContext) -> list[ContextChunk]:
 def _tool_guidance_factory(ctx: AssemblyContext) -> list[ContextChunk]:
     from agent.context_engine.sources import ToolGuidanceSource
     tool_names = getattr(ctx.agent, "valid_tool_names", []) or []
-    return ToolGuidanceSource(valid_tool_names=tool_names).collect(ctx)
+    return ToolGuidanceSource(
+        valid_tool_names=tool_names,
+        preserve_legacy_memory_guidance=True,
+    ).collect(ctx)
 
 
 def _tool_enforcement_factory(ctx: AssemblyContext) -> list[ContextChunk]:
     from agent.context_engine.sources import ToolUseEnforcementSource
     enforce = getattr(ctx.agent, "_tool_use_enforcement", None)
     model = getattr(ctx.agent, "model", None)
+    tool_names = getattr(ctx.agent, "valid_tool_names", []) or []
     return ToolUseEnforcementSource(
         tool_use_enforcement=enforce,
         model=model,
+        has_tools=bool(tool_names),
     ).collect(ctx)
 
 
@@ -70,7 +75,7 @@ def _honcho_static_factory(ctx: AssemblyContext) -> list[ContextChunk]:
 
 def _system_message_factory(ctx: AssemblyContext) -> list[ContextChunk]:
     from agent.context_engine.sources import SystemMessageSource
-    msg = getattr(ctx.agent, "system_message", None)
+    msg = ctx.system_message
     return SystemMessageSource(system_message=msg).collect(ctx)
 
 
@@ -91,7 +96,22 @@ def _user_profile_factory(ctx: AssemblyContext) -> list[ContextChunk]:
 def _skills_factory(ctx: AssemblyContext) -> list[ContextChunk]:
     from agent.context_engine.sources import SkillsSource
     tool_names = getattr(ctx.agent, "valid_tool_names", []) or []
-    return SkillsSource(available_tools=tool_names).collect(ctx)
+    try:
+        from run_agent import get_toolset_for_tool as _get_toolset_for_tool
+    except Exception:
+        _get_toolset_for_tool = None
+
+    available_toolsets: set[str] = set()
+    if _get_toolset_for_tool is not None:
+        for tool_name in tool_names:
+            toolset = _get_toolset_for_tool(tool_name)
+            if toolset:
+                available_toolsets.add(str(toolset))
+
+    return SkillsSource(
+        available_tools=tool_names,
+        available_toolsets=available_toolsets,
+    ).collect(ctx)
 
 
 def _project_context_factory(ctx: AssemblyContext) -> list[ContextChunk]:

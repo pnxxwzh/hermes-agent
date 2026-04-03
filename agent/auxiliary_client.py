@@ -704,33 +704,26 @@ def _resolve_custom_runtime() -> Tuple[Optional[str], Optional[str]]:
     endpoints where the base URL lives in config.yaml instead of the live
     environment.
     """
+    env_base = os.getenv("OPENAI_BASE_URL", "").strip().rstrip("/")
+    env_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if env_base:
+        return env_base, env_key or "no-key-required"
+
     try:
-        from hermes_cli.runtime_provider import resolve_runtime_provider
+        from hermes_cli.config import load_config
 
-        runtime = resolve_runtime_provider(requested="custom")
+        cfg = load_config()
+        model_cfg = cfg.get("model", {})
+        if isinstance(model_cfg, dict):
+            provider = str(model_cfg.get("provider") or "").strip().lower()
+            custom_base = str(model_cfg.get("base_url") or "").strip().rstrip("/")
+            custom_key = str(model_cfg.get("api_key") or "").strip()
+            if provider == "custom" and custom_base:
+                return custom_base, custom_key or os.getenv("OPENAI_API_KEY", "").strip() or "no-key-required"
     except Exception as exc:
-        logger.debug("Auxiliary client: custom runtime resolution failed: %s", exc)
-        return None, None
+        logger.debug("Auxiliary client: custom config lookup failed: %s", exc)
 
-    custom_base = runtime.get("base_url")
-    custom_key = runtime.get("api_key")
-    if not isinstance(custom_base, str) or not custom_base.strip():
-        return None, None
-
-    custom_base = custom_base.strip().rstrip("/")
-    if "openrouter.ai" in custom_base.lower():
-        # requested='custom' falls back to OpenRouter when no custom endpoint is
-        # configured. Treat that as "no custom endpoint" for auxiliary routing.
-        return None, None
-
-    # Local servers (Ollama, llama.cpp, vLLM, LM Studio) don't require auth.
-    # Use a placeholder key — the OpenAI SDK requires a non-empty string but
-    # local servers ignore the Authorization header.  Same fix as cli.py
-    # _ensure_runtime_credentials() (PR #2556).
-    if not isinstance(custom_key, str) or not custom_key.strip():
-        custom_key = "no-key-required"
-
-    return custom_base, custom_key.strip()
+    return None, None
 
 
 def _current_custom_base_url() -> str:
