@@ -23,7 +23,8 @@ def test_insert_node_round_trips(tmp_path):
     assert node["canonical_key"] == "fact:socksio-proxy"
 
 
-def test_append_evidence_is_deduplicated(tmp_path):
+def test_increment_validated_count(tmp_path):
+    """increment_validated_count increments validated_count (no meta redundant write)."""
     store = SparkGraphStore(tmp_path / "sparkgraph" / "default.db")
     node_id = store.insert_node(
         SparkGraphNodeInput(
@@ -34,23 +35,16 @@ def test_append_evidence_is_deduplicated(tmp_path):
         )
     )
 
-    first = store.append_evidence(
-        node_id=node_id,
-        session_id="session-1",
-        turn_index=3,
-        source_text="Please keep replies concise.",
-        source_kind="flush",
-    )
-    second = store.append_evidence(
-        node_id=node_id,
-        session_id="session-1",
-        turn_index=3,
-        source_text="Please keep replies concise.",
-        source_kind="flush",
-    )
+    store.increment_validated_count([node_id])
+    node = store.get_node(node_id)
+    assert node["validated_count"] == 1
 
-    assert first is True
-    assert second is False
+    store.increment_validated_count([node_id])
+    node = store.get_node(node_id)
+    assert node["validated_count"] == 2
+
+    # incrementing non-existent node is a no-op
+    store.increment_validated_count(["nonexistent-id"])
 
 
 def test_search_nodes_uses_fts_sync(tmp_path):

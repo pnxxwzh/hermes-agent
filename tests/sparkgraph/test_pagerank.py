@@ -23,7 +23,6 @@ def _insert_active(
     canonical_key: str,
     *,
     confidence: float = 0.8,
-    stability: float = 0.8,
 ) -> str:
     return store.insert_node(
         SparkGraphNodeInput(
@@ -33,7 +32,6 @@ def _insert_active(
             source_kind="flush",
             status=NodeStatus.ACTIVE,
             confidence=confidence,
-            stability=stability,
         )
     )
 
@@ -341,31 +339,24 @@ class TestRecallWithPPR:
         assert nid_a in ids  # direct hit
         assert nid_b in ids  # 1-hop neighbour
 
-    def test_candidate_only_nodes_recall_empty(self, tmp_path):
-        """CANDIDATE nodes with zero evidence can be recalled via L3 COLD (B1 fix).
-
-        The old behaviour (candidate nodes always returning []) is superseded by the
-        three-layer recall architecture: zero-evidence candidates with confidence>=0.40
-        enter L3 COLD and are discoverable as a cold-start fallback.
-        """
+    def test_deprecated_node_not_recalled(self, tmp_path):
+        """Deprecated nodes are not recalled (CANDIDATE is removed)."""
         store = SparkGraphStore(tmp_path / "sg.db")
         store.insert_node(
             SparkGraphNodeInput(
                 type=NodeType.FACT,
-                summary="candidate node",
-                canonical_key="fact:candidate",
-                source_kind="flush",
-                status=NodeStatus.CANDIDATE,
-                confidence=0.8,
-                stability=0.8,
+                summary="deprecated node",
+                canonical_key="fact:deprecated",
+                source_kind="reflection",
+                status=NodeStatus.DEPRECATED,
+                confidence=0.50,
             )
         )
         nodes, _edges = recall_nodes(
-            store, query="candidate", config=RecallConfig(max_nodes=4)
+            store, query="deprecated", config=RecallConfig(max_nodes=4)
         )
-        # B1 fix: zero-evidence CANDIDATE with confidence>=0.40 enters L3 COLD
-        assert len(nodes) == 1
-        assert nodes[0]["status"] == NodeStatus.CANDIDATE.value
+        # deprecated nodes are never recalled
+        assert len(nodes) == 0
 
     def test_dedup_preserved_after_ppr(self, tmp_path):
         """Same node from direct+related appears only once in results."""

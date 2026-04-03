@@ -128,8 +128,6 @@ class TestDedupUpdatesStatus:
         store.update_node_scoring(
             deprecated_id,
             confidence=score.confidence,
-            stability=0.62,
-            reuse_score=0.66,
             status=score.initial_status.value,
         )
 

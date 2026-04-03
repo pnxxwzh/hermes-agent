@@ -49,9 +49,9 @@ def test_schema_enforces_node_uniqueness_by_canonical_key_and_type(tmp_path):
     conn.execute(
         f"""
         INSERT INTO {NODES_TABLE} (
-            id, type, summary, detail, status, confidence, stability, reuse_score,
+            id, type, summary, detail, status, confidence,
             source_kind, canonical_key, meta, created_at, updated_at
-        ) VALUES (?, ?, ?, '', 'candidate', 0, 0, 0, 'manual', ?, '{{}}', 1, 1)
+        ) VALUES (?, ?, ?, '', 'active', 0, 'manual', ?, '{{}}', 1, 1)
         """,
         ("node-1", "FACT", "A", "canon"),
     )
@@ -61,9 +61,9 @@ def test_schema_enforces_node_uniqueness_by_canonical_key_and_type(tmp_path):
         conn.execute(
             f"""
             INSERT INTO {NODES_TABLE} (
-                id, type, summary, detail, status, confidence, stability, reuse_score,
+                id, type, summary, detail, status, confidence,
                 source_kind, canonical_key, meta, created_at, updated_at
-            ) VALUES (?, ?, ?, '', 'candidate', 0, 0, 0, 'manual', ?, '{{}}', 1, 1)
+            ) VALUES (?, ?, ?, '', 'active', 0, 'manual', ?, '{{}}', 1, 1)
             """,
             ("node-2", "FACT", "B", "canon"),
         )
@@ -82,9 +82,9 @@ def test_schema_rejects_invalid_node_enum_values(tmp_path):
         conn.execute(
             f"""
             INSERT INTO {NODES_TABLE} (
-                id, type, summary, detail, status, confidence, stability, reuse_score,
+                id, type, summary, detail, status, confidence,
                 source_kind, canonical_key, meta, created_at, updated_at
-            ) VALUES (?, ?, ?, '', ?, 0, 0, 0, ?, ?, '{{}}', 1, 1)
+            ) VALUES (?, ?, ?, '', ?, 0, ?, ?, '{{}}', 1, 1)
             """,
             ("node-1", "RULE", "bad", "archived", "tool", "canon"),
         )
@@ -95,8 +95,10 @@ def test_schema_rejects_invalid_node_enum_values(tmp_path):
         raise AssertionError("Expected enum CHECK constraints to reject invalid node fields")
 
 
-def test_initialize_schema_backfills_last_recalled_at_column_for_legacy_db(tmp_path):
+def test_initialize_schema_backfills_last_recalled_at_and_validated_count_for_legacy_db(tmp_path):
+    """v4→v5 migration: adds last_recalled_at, validated_count; drops stability, reuse_score."""
     conn = connect_db(tmp_path / "sparkgraph" / "default.db")
+    # Simulate old v3/v4 schema (no last_recalled_at, validated_count; has stability, reuse_score)
     conn.executescript(
         f"""
         CREATE TABLE IF NOT EXISTS {MIGRATIONS_TABLE} (
@@ -128,3 +130,6 @@ def test_initialize_schema_backfills_last_recalled_at_column_for_legacy_db(tmp_p
         row["name"] for row in conn.execute(f"PRAGMA table_info({NODES_TABLE})").fetchall()
     }
     assert "last_recalled_at" in columns
+    assert "validated_count" in columns
+    assert "stability" not in columns
+    assert "reuse_score" not in columns

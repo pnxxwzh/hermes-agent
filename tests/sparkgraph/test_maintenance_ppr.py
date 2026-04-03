@@ -14,7 +14,6 @@ def _insert_active(store: SparkGraphStore, summary: str, canonical_key: str) -> 
             source_kind="flush",
             status=NodeStatus.ACTIVE,
             confidence=0.8,
-            stability=0.8,
         )
     )
 

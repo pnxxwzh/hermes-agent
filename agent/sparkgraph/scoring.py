@@ -42,7 +42,6 @@ _SOURCE_BONUS: dict[str, float] = {
 
 # ─── Deprecation thresholds ────────────────────────────────────────
 STALE_RECALL_DAYS = 30
-DEPRECATE_STABILITY_THRESHOLD = 0.45
 
 
 # ─── Dataclass ────────────────────────────────────────────────────
@@ -97,9 +96,8 @@ def should_deprecate_active(
     *,
     days_since_recall_hit: int,
     validated_count: int,
-    stability: float,
 ) -> bool:
-    """30天无召回 + 低 validated_count + 低 stability → deprecated。"""
-    if days_since_recall_hit >= STALE_RECALL_DAYS and validated_count <= 1 and stability < DEPRECATE_STABILITY_THRESHOLD:
+    """30天无召回 + 低 validated_count → deprecated。"""
+    if days_since_recall_hit >= STALE_RECALL_DAYS and validated_count <= 1:
         return True
     return False

@@ -10,7 +10,7 @@ from typing import Any
 from agent.sparkgraph.dedup import build_canonical_key, find_cross_type_dedup_match, find_dedup_match
 from agent.sparkgraph.embedding import create_embedding, embedding_content_hash, embedding_enabled
 from agent.sparkgraph.config import SparkGraphEmbeddingConfig
-from agent.sparkgraph.scoring import compute_scores, default_type_priors, next_status_for_candidate
+from agent.sparkgraph.scoring import initial_score_for
 from agent.sparkgraph.store import SparkGraphNodeInput, SparkGraphStore
 from agent.sparkgraph.types import EdgeType, NodeStatus, NodeType
 from tools.registry import registry
@@ -140,7 +140,7 @@ SPARKGRAPH_STATS_SCHEMA = {
     "name": "sparkgraph_stats",
     "description": (
         "Return high-level SparkGraph database statistics, including node counts, "
-        "status distribution, type distribution, and evidence row totals."
+        "status distribution, and type distribution."
     ),
     "parameters": {
         "type": "object",
@@ -522,45 +522,22 @@ def sparkgraph_record_tool(
                 node_types=(NodeType.ISSUE, NodeType.FACT),
                 summary=summary,
             )
-        priors = default_type_priors(node_type)
-
         if existing is not None:
+            # 去重命中：来源即命运，重新查表更新 confidence 和 status
             existing_node = store.get_node(existing.node_id) or {}
             existing_type_raw = str(existing.node_type or existing_node.get("type") or node_type.value).strip().upper()
             try:
                 scoring_type = _normalize_node_type(existing_type_raw)
             except KeyError:
                 scoring_type = node_type
-            priors = default_type_priors(scoring_type)
-            store.append_evidence(
-                node_id=existing.node_id,
-                session_id=session_id,
-                turn_index=turn_index,
-                source_text=evidence,
-                source_kind=source_kind,
-            )
-            evidence_count = store.count_evidence(existing.node_id)
-            scores = compute_scores(
-                source_kind=source_kind,
-                evidence_count=evidence_count,
-                stability=priors["stability"],
-                reuse_score=priors["reuse_score"],
-                dedup_consistency_bonus=0.05 if existing.match_type == "near" else 0.10,
-            )
-            status = next_status_for_candidate(
-                source_kind=source_kind,
-                confidence=scores.confidence,
-                stability=scores.stability,
-                evidence_count=evidence_count,
-            )
+            score_result = initial_score_for(source_kind)
             store.update_node_scoring(
                 existing.node_id,
-                confidence=scores.confidence,
-                stability=scores.stability,
-                reuse_score=scores.reuse_score,
-                status=status.value,
-                confidence_components=scores.confidence_components,
+                confidence=score_result.confidence,
+                status=score_result.initial_status.value,
             )
+            # 去重命中：validated_count++（知识再次被确认）
+            store.increment_validated_count([existing.node_id])
             if embedding_enabled(embedding_config):
                 try:
                     current_node = store.get_node(existing.node_id) or {}
@@ -578,41 +555,18 @@ def sparkgraph_record_tool(
             batch_records.append((existing.node_id, scoring_type, str(existing_node.get("summary") or summary)))
             continue
 
-        scores = compute_scores(
-            source_kind=source_kind,
-            evidence_count=1,
-            stability=priors["stability"],
-            reuse_score=priors["reuse_score"],
-        )
-        status = next_status_for_candidate(
-            source_kind=source_kind,
-            confidence=scores.confidence,
-            stability=scores.stability,
-            evidence_count=1,
-        )
+        # 新建节点：来源即命运，直接查表
+        score_result = initial_score_for(source_kind)
         node_id = store.insert_node(
             SparkGraphNodeInput(
                 type=node_type,
                 summary=summary,
                 canonical_key=canonical_key,
                 source_kind=source_kind,
-                status=status,
-                confidence=scores.confidence,
-                stability=scores.stability,
-                reuse_score=scores.reuse_score,
-                meta={
-                    "confidence_components": scores.confidence_components,
-                    "confidence_version": 1,
-                    "source_kind": source_kind,
-                },
+                status=score_result.initial_status,
+                confidence=score_result.confidence,
+                meta={"source_kind": source_kind},
             )
-        )
-        store.append_evidence(
-            node_id=node_id,
-            session_id=session_id,
-            turn_index=turn_index,
-            source_text=evidence,
-            source_kind=source_kind,
         )
         if embedding_enabled(embedding_config):
             try:
@@ -689,8 +643,6 @@ def sparkgraph_search_tool(
             "status": row["status"],
             "summary": row["summary"],
             "confidence": row["confidence"],
-            "stability": row["stability"],
-            "reuse_score": row["reuse_score"],
             "updated_at": row["updated_at"],
         }
         for row in rows
@@ -708,7 +660,6 @@ def sparkgraph_stats_tool(*, store: SparkGraphStore | None) -> str:
             "nodes_total": store.count_nodes(),
             "nodes_by_status": store.count_nodes_by_status(),
             "nodes_by_type": store.count_nodes_by_type(),
-            "evidence_total": store.count_evidence_rows(),
         },
         ensure_ascii=False,
     )

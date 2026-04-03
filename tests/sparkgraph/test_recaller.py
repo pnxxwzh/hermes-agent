@@ -52,8 +52,6 @@ class TestRecallNodes:
             "source_kind": source_kind,
             "validated_count": validated_count,
             "updated_at": 1000,
-            "reuse_score": 0.6,
-            "stability": 0.62,
             "meta": "{}",
         }
 

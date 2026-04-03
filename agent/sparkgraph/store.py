@@ -34,8 +34,6 @@ class SparkGraphNodeInput:
     detail: str = ""
     status: NodeStatus = NodeStatus.ACTIVE
     confidence: float = 0.0
-    stability: float = 0.0
-    reuse_score: float = 0.0
     meta: dict[str, Any] | None = None
 
 
@@ -65,10 +63,10 @@ class SparkGraphStore:
         self._conn.execute(
             f"""
             INSERT INTO {NODES_TABLE} (
-                id, type, summary, detail, status, confidence, stability,
-                reuse_score, source_kind, canonical_key, meta, created_at, updated_at,
+                id, type, summary, detail, status, confidence,
+                source_kind, canonical_key, meta, created_at, updated_at,
                 last_recalled_at, validated_count
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 node_id,
@@ -77,8 +75,6 @@ class SparkGraphStore:
                 item.detail,
                 item.status.value,
                 item.confidence,
-                item.stability,
-                item.reuse_score,
                 item.source_kind,
                 item.canonical_key,
                 json.dumps(item.meta or {}, sort_keys=True),
@@ -127,20 +123,15 @@ class SparkGraphStore:
         return dict(row) if row else None
 
     def increment_validated_count(self, node_ids: list[str], *, now_ts: int | None = None) -> None:
-        """命中的节点 validated_count++ + recall_hits++（meta）。"""
+        """命中的节点 validated_count++。recall_hits 已删除（与 validated_count 冗余）。"""
         if not node_ids:
             return
         stamp = int(now_ts or time.time())
         for node_id in node_ids:
-            current = self.get_node(node_id)
-            if not current:
-                continue
-            meta = json.loads(current.get("meta") or "{}")
-            meta["recall_hits"] = int(meta.get("recall_hits", 0)) + 1
             self._conn.execute(
                 f"""UPDATE {NODES_TABLE} SET validated_count = validated_count + 1,
-                    last_recalled_at = ?, meta = ?, updated_at = updated_at WHERE id = ?""",
-                (stamp, json.dumps(meta, sort_keys=True), node_id),
+                    last_recalled_at = ?, updated_at = updated_at WHERE id = ?""",
+                (stamp, node_id),
             )
         self._conn.commit()
 
@@ -182,8 +173,6 @@ class SparkGraphStore:
         node_id: str,
         *,
         confidence: float,
-        stability: float,
-        reuse_score: float,
         status: str,
         confidence_components: dict[str, Any] | None = None,
     ) -> None:
@@ -193,17 +182,14 @@ class SparkGraphStore:
         meta = json.loads(current.get("meta") or "{}")
         if confidence_components is not None:
             meta["confidence_components"] = confidence_components
-            meta["confidence_version"] = 1
         self._conn.execute(
             f"""
             UPDATE {NODES_TABLE}
-            SET confidence = ?, stability = ?, reuse_score = ?, status = ?, meta = ?, updated_at = ?
+            SET confidence = ?, status = ?, meta = ?, updated_at = ?
             WHERE id = ?
             """,
             (
                 confidence,
-                stability,
-                reuse_score,
                 status,
                 json.dumps(meta, sort_keys=True),
                 int(time.time()),

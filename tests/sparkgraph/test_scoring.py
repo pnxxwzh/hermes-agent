@@ -9,7 +9,6 @@ from agent.sparkgraph.scoring import (
     recall_priority_score,
     should_deprecate_active,
     STALE_RECALL_DAYS,
-    DEPRECATE_STABILITY_THRESHOLD,
 )
 from agent.sparkgraph.types import NodeStatus
 
@@ -99,14 +98,13 @@ class TestRecallPriorityScore:
 
 
 class TestShouldDeprecateActive:
-    """TC-S-06: should_deprecate_active 条件判断"""
+    """TC-S-06: should_deprecate_active 条件判断（仅 days_since_recall_hit + validated_count）"""
 
-    def test_stale_low_validated_low_stability_deprecated(self):
-        """30天无召回 + validated_count≤1 + stability<0.45 → deprecated。"""
+    def test_stale_low_validated_deprecated(self):
+        """30天无召回 + validated_count≤1 → deprecated。"""
         assert should_deprecate_active(
             days_since_recall_hit=STALE_RECALL_DAYS,
             validated_count=0,
-            stability=0.40,
         ) is True
 
     def test_stale_but_high_validated_not_deprecated(self):
@@ -114,7 +112,6 @@ class TestShouldDeprecateActive:
         assert should_deprecate_active(
             days_since_recall_hit=STALE_RECALL_DAYS,
             validated_count=3,
-            stability=0.40,
         ) is False
 
     def test_recent_recall_not_deprecated(self):
@@ -122,13 +119,4 @@ class TestShouldDeprecateActive:
         assert should_deprecate_active(
             days_since_recall_hit=0,
             validated_count=0,
-            stability=0.40,
-        ) is False
-
-    def test_high_stability_not_deprecated(self):
-        """stability 高 → 不 deprecated。"""
-        assert should_deprecate_active(
-            days_since_recall_hit=STALE_RECALL_DAYS,
-            validated_count=0,
-            stability=0.60,
         ) is False

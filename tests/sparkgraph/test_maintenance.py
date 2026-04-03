@@ -1,4 +1,4 @@
-"""Tests for simplified maintenance (no CANDIDATE, no evidence)."""
+"""Tests for simplified maintenance (no CANDIDATE, no evidence, no stability/reuse_score)."""
 
 import time
 
@@ -8,8 +8,8 @@ from agent.sparkgraph.store import SparkGraphNodeInput, SparkGraphStore
 from agent.sparkgraph.types import NodeStatus, NodeType
 
 
-def test_run_flush_maintenance_deprecates_stale_low_signal_active(tmp_path):
-    """ACTIVE node idle 30+ days + low validated_count + low stability → deprecated."""
+def test_run_flush_maintenance_deprecates_stale_low_validated_active(tmp_path):
+    """ACTIVE node idle 30+ days + low validated_count → deprecated."""
     store = SparkGraphStore(tmp_path / "sparkgraph" / "default.db")
     node_id = store.insert_node(
         SparkGraphNodeInput(
@@ -19,8 +19,6 @@ def test_run_flush_maintenance_deprecates_stale_low_signal_active(tmp_path):
             source_kind="flush",
             status=NodeStatus.ACTIVE,
             confidence=0.72,
-            stability=0.30,
-            reuse_score=0.20,
         )
     )
     stale_ts = int(time.time()) - ((STALE_RECALL_DAYS + 1) * 24 * 60 * 60)
@@ -45,8 +43,6 @@ def test_run_flush_maintenance_keeps_high_validated_node(tmp_path):
             source_kind="manual",
             status=NodeStatus.ACTIVE,
             confidence=0.90,
-            stability=0.80,
-            reuse_score=0.78,
         )
     )
     stale_ts = int(time.time()) - ((STALE_RECALL_DAYS + 1) * 24 * 60 * 60)
@@ -74,8 +70,6 @@ def test_run_flush_maintenance_keeps_recent_node(tmp_path):
             source_kind="flush",
             status=NodeStatus.ACTIVE,
             confidence=0.72,
-            stability=0.62,
-            reuse_score=0.66,
         )
     )
 

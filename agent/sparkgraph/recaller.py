@@ -109,13 +109,11 @@ def _merge_hit(
 # ─── Sorting ─────────────────────────────────────────────────────
 
 
-def _sort_key(node: dict[str, Any]) -> tuple[float, float, float, float, int]:
-    """Fallback sort: validated_count (primary), confidence, reuse_score, stability, updated_at."""
+def _sort_key(node: dict[str, Any]) -> tuple[float, float, int]:
+    """Fallback sort: validated_count (primary), confidence, updated_at."""
     return (
         float(node.get("validated_count") or 0),
         float(node.get("confidence") or 0.0),
-        float(node.get("reuse_score") or 0.0),
-        float(node.get("stability") or 0.0),
         int(node.get("updated_at") or 0),
     )
 

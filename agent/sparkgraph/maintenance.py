@@ -1,17 +1,16 @@
 """Flush-aligned lightweight maintenance for SparkGraph.
 
 无 CANDIDATE，无 evidence_based_promotion。
-deprecated 规则：30天无召回 + validated_count≤1 + stability<0.45
+deprecated 规则：30天无召回 + validated_count≤1
 """
 
 from __future__ import annotations
 
-import json
 import time
 
 from agent.sparkgraph.config import SparkGraphEmbeddingConfig
 from agent.sparkgraph.embedding import create_embedding, embedding_content_hash, embedding_enabled
-from agent.sparkgraph.scoring import should_deprecate_active, STALE_RECALL_DAYS
+from agent.sparkgraph.scoring import should_deprecate_active
 from agent.sparkgraph.store import SparkGraphStore
 from agent.sparkgraph.types import NodeStatus
 
@@ -33,12 +32,10 @@ def run_flush_maintenance(
         reference_ts = last_recall or int(node.get("updated_at") or now_ts)
         days_idle = max(0, (now_ts - reference_ts) // 86400)
         validated = int(node.get("validated_count") or 0)
-        stability = float(node.get("stability") or 0.0)
 
         if should_deprecate_active(
             days_since_recall_hit=days_idle,
             validated_count=validated,
-            stability=stability,
         ):
             store.update_node_status(node["id"], status=NodeStatus.DEPRECATED.value)
             deprecated += 1
