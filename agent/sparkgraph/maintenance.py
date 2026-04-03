@@ -25,13 +25,53 @@ def run_flush_maintenance(
     now_ts = int(now_ts or time.time())
 
     deprecated = 0
+    scanned = 0
 
     # 检查所有 active 节点是否应 deprecated
     for node in store.list_nodes(status=NodeStatus.ACTIVE.value):
+        scanned += 1
         last_recall = int(node.get("last_recalled_at") or 0)
-        reference_ts = last_recall or int(node.get("updated_at") or now_ts)
-        days_idle = max(0, (now_ts - reference_ts) // 86400)
+        updated_at = int(node.get("updated_at") or now_ts)
         validated = int(node.get("validated_count") or 0)
+
+        # reference_ts 选取逻辑（修复 B1 根因）：
+        #
+        # 核心不变量：increment_validated_count 总是设置 last_recalled_at = now。
+        # 因此任何真正的召回之后，last_recalled_at >= updated_at。
+        # 如果 last_recalled_at < updated_at，说明节点是在上次内容更新之前被召回的，
+        # updated_at 的刷新来源于 dedup（而非新的召回）。
+        #
+        # 三段式判断：
+        #
+        # 1. last_recalled_at > updated_at：
+        #    节点在上次更新之后被召回过。last_recalled_at 是可信的最后召回时间。
+        #
+        # 2. last_recalled_at <= updated_at 且 validated_count > 0：
+        #    节点被召回（validated_count>0），但召回发生在上次内容更新之前。
+        #    updated_at 的更新来源于 dedup 或其他内容修改，不反映新的召回活动。
+        #    此时 last_recalled_at 仍是最新的召回时间信号。
+        #
+        # 3. last_recalled_at <= updated_at 且 validated_count == 0：
+        #    从未被计数过的节点（还在等待首次召回），视为新节点，不淘汰。
+        #
+        # 覆盖场景：
+        #   (a) 正常召回：last_recalled_at(召回时间) > updated_at(上次更新时间) ✓
+        #   (b) dedup：last_recalled_at(召回时间) <= updated_at(昨天) 但 validated_count>0
+        #       → 仍用 last_recalled_at（dedup 不应重置 idle 时间）✓
+        #   (c) 老数据：last_recalled_at=0 <= updated_at(31天前)，validated_count>0
+        #       → 用 last_recalled_at=0，validated_count>0 → 走 should_deprecate_active ✓
+        #   (d) 新节点：last_recalled_at=0 <= updated_at(now)，validated_count=0
+        #       → reference_ts=now_ts → days_idle=0，不淘汰 ✓
+        if last_recall > updated_at:
+            reference_ts = last_recall
+        elif validated > 0:
+            # validated_count>0：节点曾被计数过（last_recalled_at 是可信的最后召回时间）
+            reference_ts = last_recall
+        else:
+            # validated_count=0：从未被计数，视为新节点
+            reference_ts = now_ts
+
+        days_idle = max(0, (now_ts - reference_ts) // 86400)
 
         if should_deprecate_active(
             days_since_recall_hit=days_idle,
@@ -62,6 +102,7 @@ def run_flush_maintenance(
                 continue
 
     result: dict[str, int] = {
+        "scanned": scanned,
         "deprecated": deprecated,
         "vectors_backfilled": vectors_backfilled,
     }

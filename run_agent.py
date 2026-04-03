@@ -6669,29 +6669,6 @@ class AIAgent:
         except Exception as exc:
             logger.warning("pre_llm_call hook failed: %s", exc)
 
-        _sparkgraph_turn_context = ""
-        if self._sparkgraph_enabled and self._sparkgraph_manager and original_user_message:
-            try:
-                _sparkgraph_turn_context = self._sparkgraph_manager.build_recall_block(
-                    original_user_message,
-                )
-                if _sparkgraph_turn_context:
-                    _recall_lines = [
-                        line.strip() for line in _sparkgraph_turn_context.splitlines()
-                        if line.strip().startswith("- [")
-                    ]
-                    logger.debug(
-                        "SparkGraph recall injected for query=%r hits=%d",
-                        original_user_message,
-                        len(_recall_lines),
-                    )
-                    if self.quiet_mode:
-                        _recall_msg = _format_sparkgraph_recall_message(_sparkgraph_turn_context)
-                        if _recall_msg:
-                            self._print_fn(_recall_msg)
-            except Exception as exc:
-                logger.debug("SparkGraph recall build failed: %s", exc)
-
         # Main conversation loop
         api_call_count = 0
         final_response = None

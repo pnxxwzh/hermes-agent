@@ -127,12 +127,8 @@ from .tts_tool import (
 
 from .sparkgraph_tool import (
     sparkgraph_record_tool,
-    sparkgraph_search_tool,
-    sparkgraph_stats_tool,
     check_sparkgraph_requirements,
     SPARKGRAPH_RECORD_SCHEMA,
-    SPARKGRAPH_SEARCH_SCHEMA,
-    SPARKGRAPH_STATS_SCHEMA,
 )
 
 # Planning & task management tool
@@ -251,14 +247,6 @@ __all__ = [
     # Text-to-speech tools
     'text_to_speech_tool',
     'check_tts_requirements',
-    'sparkgraph_record_tool',
-    'sparkgraph_search_tool',
-    'sparkgraph_stats_tool',
-    'check_sparkgraph_requirements',
-    'SPARKGRAPH_RECORD_SCHEMA',
-    'SPARKGRAPH_SEARCH_SCHEMA',
-    'SPARKGRAPH_STATS_SCHEMA',
-    # SparkGraph tools
     'sparkgraph_record_tool',
     'check_sparkgraph_requirements',
     'SPARKGRAPH_RECORD_SCHEMA',
