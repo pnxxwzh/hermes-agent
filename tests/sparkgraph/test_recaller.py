@@ -66,7 +66,7 @@ class TestRecallNodes:
         store.get_edges_for_nodes.return_value = []
         store.increment_validated_count = MagicMock()
 
-        nodes, _ = recall_nodes(store, query="proxy pac error")
+        nodes, _, _ = recall_nodes(store, query="proxy pac error")
         assert nodes == []
 
     def test_active_fts_node_recalled(self):
@@ -79,7 +79,7 @@ class TestRecallNodes:
         store.get_edges_for_nodes.return_value = []
         store.increment_validated_count = MagicMock()
 
-        nodes, edges = recall_nodes(store, query="proxy pac script")
+        nodes, edges, _ = recall_nodes(store, query="proxy pac script")
         assert len(nodes) == 1
         assert nodes[0]["id"] == "n1"
         store.increment_validated_count.assert_called_once_with(["n1"])
@@ -95,7 +95,7 @@ class TestRecallNodes:
         store.get_edges_for_nodes.return_value = []
         store.increment_validated_count = MagicMock()
 
-        nodes, edges = recall_nodes(store, query="proxy pac error")
+        nodes, edges, _ = recall_nodes(store, query="proxy pac error")
         node_ids = {n["id"] for n in nodes}
         assert "n1" in node_ids
         assert "n2" in node_ids
@@ -113,7 +113,7 @@ class TestRecallNodes:
         store.get_edges_for_nodes.return_value = []
         store.increment_validated_count = MagicMock()
 
-        nodes, edges = recall_nodes(store, query="proxy pac error")
+        nodes, edges, _ = recall_nodes(store, query="proxy pac error")
         node_ids = {n["id"] for n in nodes}
         assert "n2" not in node_ids
 
@@ -128,7 +128,7 @@ class TestRecallNodes:
         store.get_edges_for_nodes.return_value = []
         store.increment_validated_count = MagicMock()
 
-        nodes, edges = recall_nodes(store, query="proxy pac")
+        nodes, edges, _ = recall_nodes(store, query="proxy pac")
         # validated_count=10 should rank above validated_count=0
         assert nodes[0]["id"] == "n2"
         assert nodes[1]["id"] == "n1"
@@ -144,7 +144,7 @@ class TestRecallNodes:
         store.increment_validated_count = MagicMock()
 
         cfg = RecallConfig(max_nodes=3)
-        result, _ = recall_nodes(store, query="node", config=cfg)
+        result, _, _ = recall_nodes(store, query="node", config=cfg)
         assert len(result) == 3
 
     def test_no_increment_without_results(self):
@@ -158,3 +158,19 @@ class TestRecallNodes:
 
         recall_nodes(store, query="")
         store.increment_validated_count.assert_not_called()
+
+    def test_recall_returns_token_estimate(self):
+        """recall_nodes returns (nodes, edges, token_estimate) where token_estimate ≈ chars/3."""
+        store = MagicMock()
+        store.search_nodes.return_value = [
+            self._make_node("n1", "proxy pac script", confidence=0.88),
+            self._make_node("n2", "proxy pac error", confidence=0.72),
+        ]
+        store.list_vector_nodes.return_value = []
+        store.get_related_nodes.return_value = []
+        store.get_edges_for_nodes.return_value = []
+        store.increment_validated_count = MagicMock()
+
+        nodes, edges, token_estimate = recall_nodes(store, query="proxy pac")
+        # summary chars: "proxy pac script"=17 + "proxy pac error"=15 = 32 → 32/3 ≈ 11
+        assert token_estimate == pytest.approx(10.67, rel=1)

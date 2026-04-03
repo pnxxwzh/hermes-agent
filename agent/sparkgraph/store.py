@@ -34,6 +34,7 @@ class SparkGraphNodeInput:
     detail: str = ""
     status: NodeStatus = NodeStatus.ACTIVE
     confidence: float = 0.0
+    default_inject: bool = True
     meta: dict[str, Any] | None = None
 
 
@@ -60,13 +61,14 @@ class SparkGraphStore:
         now = int(time.time())
         node_id = uuid.uuid4().hex
         validated_count = item.meta.get("validated_count", 0) if item.meta else 0
+        source_sessions = json.dumps(item.meta.get("source_sessions", [])) if item.meta else "[]"
         self._conn.execute(
             f"""
             INSERT INTO {NODES_TABLE} (
                 id, type, summary, detail, status, confidence,
-                source_kind, canonical_key, meta, created_at, updated_at,
-                last_recalled_at, validated_count
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                source_kind, canonical_key, meta, source_sessions, default_inject,
+                created_at, updated_at, last_recalled_at, validated_count
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 node_id,
@@ -78,6 +80,8 @@ class SparkGraphStore:
                 item.source_kind,
                 item.canonical_key,
                 json.dumps(item.meta or {}, sort_keys=True),
+                source_sessions,
+                1 if item.default_inject else 0,
                 now,
                 now,
                 0,
@@ -133,6 +137,82 @@ class SparkGraphStore:
                     last_recalled_at = ?, updated_at = updated_at WHERE id = ?""",
                 (stamp, node_id),
             )
+        self._conn.commit()
+
+    def merge_source_sessions(self, node_id: str, new_session_id: str) -> None:
+        """去重命中时：合并当前 session 到 source_sessions（去重）。"""
+        current = self.get_node(node_id)
+        if not current:
+            return
+        sessions = json.loads(current.get("source_sessions") or "[]")
+        if new_session_id and new_session_id not in sessions:
+            sessions.append(new_session_id)
+        self._conn.execute(
+            f"UPDATE {NODES_TABLE} SET source_sessions = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(sessions, sort_keys=True), int(time.time()), node_id),
+        )
+        self._conn.commit()
+
+    def merge_nodes(self, keep_id: str, merge_id: str) -> None:
+        """将 merge_id 合并到 keep_id：
+        1. keep validated_count += merge validated_count
+        2. keep source_sessions = union of both sessions
+        3. 迁移 merge 的所有边到 keep
+        4. 删除 merge 自环（同 from_id==to_id）
+        5. 去重重复边（同 from_id+to_id+type 只留一条）
+        6. merge 节点标记 deprecated
+        """
+        keep = self.get_node(keep_id)
+        merge = self.get_node(merge_id)
+        if not keep or not merge:
+            return
+        now = int(time.time())
+
+        # 1. 累加 validated_count
+        merged_validated = int(keep.get("validated_count") or 0) + int(merge.get("validated_count") or 0)
+
+        # 2. 合并 source_sessions
+        keep_sessions = set(json.loads(keep.get("source_sessions") or "[]"))
+        merge_sessions = set(json.loads(merge.get("source_sessions") or "[]"))
+        all_sessions = keep_sessions | merge_sessions
+
+        self._conn.execute(
+            f"""UPDATE {NODES_TABLE}
+                SET validated_count = ?, source_sessions = ?, updated_at = ?
+                WHERE id = ?""",
+            (merged_validated, json.dumps(list(all_sessions), sort_keys=True), now, keep_id),
+        )
+
+        # 3. 迁移边（from_id/to_id 替换）
+        self._conn.execute(
+            f"""UPDATE {EDGES_TABLE}
+                SET from_id = ? WHERE from_id = ?""",
+            (keep_id, merge_id),
+        )
+        self._conn.execute(
+            f"""UPDATE {EDGES_TABLE}
+                SET to_id = ? WHERE to_id = ?""",
+            (keep_id, merge_id),
+        )
+
+        # 4. 删除自环
+        self._conn.execute(f"DELETE FROM {EDGES_TABLE} WHERE from_id = to_id")
+
+        # 5. 去重：保留第一条，删除后续重复
+        self._conn.execute(f"""
+            DELETE FROM {EDGES_TABLE}
+            WHERE rowid NOT IN (
+                SELECT MIN(rowid) FROM {EDGES_TABLE}
+                GROUP BY from_id, to_id, type
+            )
+        """)
+
+        # 6. merge 节点 deprecated
+        self._conn.execute(
+            f"UPDATE {NODES_TABLE} SET status = ?, updated_at = ? WHERE id = ?",
+            (NodeStatus.DEPRECATED.value, now, merge_id),
+        )
+
         self._conn.commit()
 
     def count_nodes(self, *, status: str | None = None) -> int:
@@ -297,6 +377,38 @@ class SparkGraphStore:
                 """,
                 tuple(params),
             ).fetchall()
+        except sqlite3.OperationalError:
+            return []
+        return [dict(row) for row in rows]
+
+    def get_by_source_kind(
+        self, kinds: list[str], query: str = "", *, limit: int = 6
+    ) -> list[dict[str, Any]]:
+        """Returns active nodes of given source_kinds, optionally filtered by query keywords.
+
+        Used by recall to provide explicit/manual source priority.
+        """
+        if not kinds:
+            return []
+        if query:
+            terms = [t.strip() for t in query.lower().split() if t.strip()]
+            like_parts = " OR ".join(["n.summary LIKE '%' || ? || '%'" for _ in terms])
+            where = f"({like_parts}) AND n.status = ?"
+            params: list[Any] = kinds + terms + [NodeStatus.ACTIVE.value]
+        else:
+            where = "n.status = ?"
+            params = kinds + [NodeStatus.ACTIVE.value]
+
+        sql = f"""
+            SELECT n.* FROM {NODES_TABLE} n
+            WHERE n.source_kind IN ({','.join(['?' for _ in kinds])})
+              AND {where}
+            ORDER BY n.validated_count DESC, n.updated_at DESC
+            LIMIT ?
+        """
+        params.append(limit)
+        try:
+            rows = self._conn.execute(sql, tuple(params)).fetchall()
         except sqlite3.OperationalError:
             return []
         return [dict(row) for row in rows]

@@ -538,6 +538,7 @@ def sparkgraph_record_tool(
             )
             # 去重命中：validated_count++（知识再次被确认）
             store.increment_validated_count([existing.node_id])
+            store.merge_source_sessions(existing.node_id, session_id)
             if embedding_enabled(embedding_config):
                 try:
                     current_node = store.get_node(existing.node_id) or {}
@@ -565,7 +566,8 @@ def sparkgraph_record_tool(
                 source_kind=source_kind,
                 status=score_result.initial_status,
                 confidence=score_result.confidence,
-                meta={"source_kind": source_kind},
+                default_inject=source_kind not in {"reflection", "shadow"},
+                meta={"source_kind": source_kind, "source_sessions": [session_id] if session_id else []},
             )
         )
         if embedding_enabled(embedding_config):

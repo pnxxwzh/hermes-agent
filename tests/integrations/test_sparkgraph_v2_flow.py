@@ -42,7 +42,7 @@ class TestSourceKindFate:
                 source_kind="flush",
             )
         )
-        nodes, _ = recall_nodes(store, query="proxy pac script")
+        nodes, _, _ = recall_nodes(store, query="proxy pac script")
         assert any(n["id"] == node_id for n in nodes), "flush node should be immediately recallable"
 
 
@@ -66,7 +66,7 @@ class TestReflectionDeprecated:
                 confidence=score.confidence,
             )
         )
-        nodes, _ = recall_nodes(store, query="broken idea")
+        nodes, _, _ = recall_nodes(store, query="broken idea")
         assert not any(n["id"] == node_id for n in nodes), "deprecated node should not be recallable"
 
 
@@ -84,14 +84,14 @@ class TestValidatedCountIncrement:
             )
         )
         # First recall
-        nodes1, _ = recall_nodes(store, query="python brew")
+        nodes1, _, _ = recall_nodes(store, query="python brew")
         assert any(n["id"] == node_id for n in nodes1)
 
         node_after_1 = store.get_node(node_id)
         assert node_after_1["validated_count"] == 1
 
         # Second recall
-        nodes2, _ = recall_nodes(store, query="python brew")
+        nodes2, _, _ = recall_nodes(store, query="python brew")
         assert any(n["id"] == node_id for n in nodes2)
 
         node_after_2 = store.get_node(node_id)

@@ -41,17 +41,17 @@ class TestWrapSparkgraphBuildRecall:
     def test_wrap_sparkgraph_returns_string(self):
         """T5c.4: normal call returns block string."""
         mock_manager = MagicMock()
-        mock_manager.build_recall_block.return_value = "[SparkGraph Recall]"
+        mock_manager.build_recall_block.return_value = ("[SparkGraph Recall]", 0)
         content, err = wrap_sparkgraph_build_recall(
             mock_manager, True, "query"
         )
         assert content == "[SparkGraph Recall]"
         assert err is None
 
-    def test_wrap_sparkgraph_returns_non_string(self):
-        """T5c.x: non-string return -> "". """
+    def test_wrap_sparkgraph_returns_empty_tuple(self):
+        """T5c.x: empty tuple (block="", token=0) -> "". """
         mock_manager = MagicMock()
-        mock_manager.build_recall_block.return_value = None
+        mock_manager.build_recall_block.return_value = ("", 0)
         content, err = wrap_sparkgraph_build_recall(
             mock_manager, True, "query"
         )
@@ -61,7 +61,7 @@ class TestWrapSparkgraphBuildRecall:
     def test_wrap_sparkgraph_passed_args(self):
         """T5c.x: user_message, max_nodes, max_chars passed through."""
         mock_manager = MagicMock()
-        mock_manager.build_recall_block.return_value = ""
+        mock_manager.build_recall_block.return_value = ("", 0)
         wrap_sparkgraph_build_recall(
             mock_manager, True, "my query",
             max_nodes=5, max_chars=1000,

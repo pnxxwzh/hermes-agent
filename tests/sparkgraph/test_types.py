@@ -24,7 +24,6 @@ def test_edge_types_match_v2_contract():
 
 def test_node_status_values_match_v2_contract():
     assert [item.value for item in NodeStatus] == [
-        "candidate",
         "active",
         "deprecated",
     ]

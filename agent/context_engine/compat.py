@@ -204,13 +204,12 @@ def wrap_sparkgraph_build_recall(
     if not sparkgraph_enabled or sparkgraph_manager is None:
         return "", None
     try:
-        block = sparkgraph_manager.build_recall_block(
+        block, _token_estimate = sparkgraph_manager.build_recall_block(
             user_message,
             max_nodes=max_nodes,
             max_chars=max_chars,
         )
-        content = block if isinstance(block, str) else ""
-        return content, None
+        return block, None
     except Exception as e:
         logger.debug("wrap_sparkgraph_build_recall failed: %s", e)
         return "", str(e)

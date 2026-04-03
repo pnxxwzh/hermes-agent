@@ -1,9 +1,10 @@
+import json
 import sqlite3
 
 import pytest
 
 from agent.sparkgraph.store import SparkGraphNodeInput, SparkGraphStore
-from agent.sparkgraph.types import NodeType
+from agent.sparkgraph.types import EdgeType, NodeStatus, NodeType
 
 
 def test_insert_node_round_trips(tmp_path):
@@ -45,6 +46,196 @@ def test_increment_validated_count(tmp_path):
 
     # incrementing non-existent node is a no-op
     store.increment_validated_count(["nonexistent-id"])
+
+
+def test_get_by_source_kind(tmp_path):
+    """get_by_source_kind returns explicit/manual nodes filtered by query."""
+    store = SparkGraphStore(tmp_path / "sparkgraph" / "default.db")
+
+    # Insert nodes with different source_kinds
+    store.insert_node(
+        SparkGraphNodeInput(
+            type=NodeType.FACT,
+            summary="proxy pac script setup guide",
+            canonical_key="fact:proxy-pac-script",
+            source_kind="explicit",
+        )
+    )
+    explicit_id = store.insert_node(
+        SparkGraphNodeInput(
+            type=NodeType.FACT,
+            summary="docker compose port forwarding",
+            canonical_key="fact:docker-compose-port-forwarding",
+            source_kind="manual",
+        )
+    )
+    flush_id = store.insert_node(
+        SparkGraphNodeInput(
+            type=NodeType.ISSUE,
+            summary="proxy pac script not applied",
+            canonical_key="issue:proxy-pac-not-applied",
+            source_kind="flush",
+        )
+    )
+
+    # Filter by source_kind only
+    results = store.get_by_source_kind(["manual"])
+    assert len(results) == 1
+    assert results[0]["id"] == explicit_id
+
+    results = store.get_by_source_kind(["explicit", "manual"])
+    assert len(results) == 2
+    ids = {r["id"] for r in results}
+    assert explicit_id in ids
+    assert flush_id not in ids  # flush is not in explicit/manual
+
+    # Filter by source_kind + query keyword
+    results = store.get_by_source_kind(["explicit", "manual"], "docker")
+    assert len(results) == 1
+    assert results[0]["id"] == explicit_id
+
+    # Non-matching query returns empty
+    results = store.get_by_source_kind(["explicit", "manual"], "nonexistent")
+    assert results == []
+
+    # Empty kinds returns empty
+    results = store.get_by_source_kind([], "proxy")
+    assert results == []
+
+
+def test_default_inject_flag(tmp_path):
+    """default_inject: explicit/manual→1, reflection/shadow→0, 默认→1."""
+    store = SparkGraphStore(tmp_path / "sparkgraph" / "default.db")
+
+    explicit_id = store.insert_node(
+        SparkGraphNodeInput(
+            type=NodeType.FACT,
+            summary="explicit fact",
+            canonical_key="fact:explicit-fact",
+            source_kind="explicit",
+            default_inject=True,
+        )
+    )
+    reflection_id = store.insert_node(
+        SparkGraphNodeInput(
+            type=NodeType.FACT,
+            summary="reflection",
+            canonical_key="fact:reflection",
+            source_kind="reflection",
+            default_inject=False,
+        )
+    )
+    default_id = store.insert_node(
+        SparkGraphNodeInput(
+            type=NodeType.FACT,
+            summary="default",
+            canonical_key="fact:default",
+            source_kind="flush",
+        )
+    )
+
+    explicit_node = store.get_node(explicit_id)
+    reflection_node = store.get_node(reflection_id)
+    default_node = store.get_node(default_id)
+
+    assert explicit_node["default_inject"] == 1
+    assert reflection_node["default_inject"] == 0
+    assert default_node["default_inject"] == 1  # default=True
+
+
+def test_merge_nodes(tmp_path):
+    """merge_nodes: validated_count累加 + source_sessions合并 + 边迁移 + deprecated."""
+    store = SparkGraphStore(tmp_path / "sparkgraph" / "default.db")
+
+    # Create two nodes
+    keep_id = store.insert_node(
+        SparkGraphNodeInput(
+            type=NodeType.FACT,
+            summary="keep node",
+            canonical_key="fact:keep-node",
+            source_kind="explicit",
+            status=NodeStatus.ACTIVE,
+            confidence=0.90,
+            meta={"source_sessions": ["session-alpha"]},
+        )
+    )
+    merge_id = store.insert_node(
+        SparkGraphNodeInput(
+            type=NodeType.FACT,
+            summary="merge node",
+            canonical_key="fact:merge-node",
+            source_kind="manual",
+            status=NodeStatus.ACTIVE,
+            confidence=0.70,
+            meta={"source_sessions": ["session-beta"]},
+        )
+    )
+
+    # Create an edge from merge to another node
+    other_id = store.insert_node(
+        SparkGraphNodeInput(
+            type=NodeType.ISSUE,
+            summary="related issue",
+            canonical_key="issue:related-issue",
+            source_kind="flush",
+        )
+    )
+    store.insert_edge(from_id=merge_id, to_id=other_id, edge_type=EdgeType.RELATED_TO, weight=0.5)
+
+    # Merge
+    store.merge_nodes(keep_id, merge_id)
+
+    # keep: validated_count累加, sessions合并, status保持active
+    keep = store.get_node(keep_id)
+    assert keep["status"] == NodeStatus.ACTIVE.value
+    assert keep["validated_count"] == 0  # neither had validated_count
+    sessions = set(json.loads(keep["source_sessions"]))
+    assert sessions == {"session-alpha", "session-beta"}
+
+    # merge: deprecated
+    merged = store.get_node(merge_id)
+    assert merged["status"] == NodeStatus.DEPRECATED.value
+
+    # edge migrated: from_id now points to keep_id
+    rows = store.conn.execute(
+        "SELECT * FROM sg_edges WHERE from_id = ?", (keep_id,)
+    ).fetchall()
+    assert len(rows) == 1
+
+    # merge node has no outgoing edges left
+    rows2 = store.conn.execute(
+        "SELECT * FROM sg_edges WHERE from_id = ?", (merge_id,)
+    ).fetchall()
+    assert len(rows2) == 0
+
+
+def test_merge_source_sessions(tmp_path):
+    """merge_source_sessions adds new session ID (dedup path)."""
+    store = SparkGraphStore(tmp_path / "sparkgraph" / "default.db")
+    node_id = store.insert_node(
+        SparkGraphNodeInput(
+            type=NodeType.FACT,
+            summary="some fact",
+            canonical_key="fact:some-fact",
+            source_kind="flush",
+            meta={"source_sessions": ["session-alpha"]},
+        )
+    )
+
+    # Merge new session
+    store.merge_source_sessions(node_id, "session-beta")
+    node = store.get_node(node_id)
+    sessions = json.loads(node["source_sessions"])
+    assert set(sessions) == {"session-alpha", "session-beta"}
+
+    # Duplicate merge is a no-op
+    store.merge_source_sessions(node_id, "session-beta")
+    node = store.get_node(node_id)
+    sessions = json.loads(node["source_sessions"])
+    assert sessions.count("session-beta") == 1  # no duplication
+
+    # Merge on non-existent node is a no-op
+    store.merge_source_sessions("nonexistent-id", "session-gamma")
 
 
 def test_search_nodes_uses_fts_sync(tmp_path):

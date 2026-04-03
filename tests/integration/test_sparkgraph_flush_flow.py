@@ -135,7 +135,7 @@ def test_fact_flush_writes_graph_and_later_turn_recalls(sparkgraph_agent):
 
     rows = agent._sparkgraph_store.search_nodes("socksio", status="active", limit=4)
     assert rows, "Expected SparkGraph flush to create an active node"
-    recall_block = agent._sparkgraph_manager.build_recall_block(
+    recall_block, _ = agent._sparkgraph_manager.build_recall_block(
         "socksio may be required for SOCKS proxy support"
     )
     assert "[SparkGraph Recall]" in recall_block
@@ -189,7 +189,7 @@ def test_preference_flush_writes_graph_and_later_turn_recalls(sparkgraph_agent):
     rows = agent._sparkgraph_store.search_nodes("concise replies", status="active", limit=4)
     assert rows, "Expected SparkGraph flush to create an active preference node"
 
-    recall_block = agent._sparkgraph_manager.build_recall_block("concise replies")
+    recall_block, _ = agent._sparkgraph_manager.build_recall_block("concise replies")
     assert "[SparkGraph Recall]" in recall_block
     assert "User prefers concise replies" in recall_block
 
@@ -261,7 +261,7 @@ def test_b1_candidate_with_evidence_recalled_via_l1_direct(sparkgraph_agent):
     )
 
     # Now L1 DIRECT recall: candidate with evidence>=1 should appear
-    recall_block = agent._sparkgraph_manager.build_recall_block(
+    recall_block, _ = agent._sparkgraph_manager.build_recall_block(
         "docker compose port forwarding not accessible"
     )
     assert "[SparkGraph Recall]" in recall_block, "Recall block should be generated"
@@ -407,7 +407,7 @@ def test_b1_full_cycle_candidate_to_active_via_recall(sparkgraph_agent):
     )
 
     # Step 3: L1 DIRECT recall — with evidence>=1, node should appear
-    recall_block = agent._sparkgraph_manager.build_recall_block("docker compose network isolation")
+    recall_block, _ = agent._sparkgraph_manager.build_recall_block("docker compose network isolation")
     assert "[SparkGraph Recall]" in recall_block, (
         "Node with evidence>=1 should appear in L1 DIRECT recall block (B1 fix)"
     )

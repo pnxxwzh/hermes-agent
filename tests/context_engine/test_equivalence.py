@@ -176,7 +176,7 @@ class TestEquivalence:
     def test_sparkgraph_only_match(self):
         """SparkGraph-only: assembler and fallback produce identical output."""
         mock_manager = MagicMock()
-        mock_manager.build_recall_block.return_value = "SparkGraph recall block"
+        mock_manager.build_recall_block.return_value = ("SparkGraph recall block", 0)
 
         agent = self._make_mock_agent(
             sparkgraph_enabled=True,
@@ -199,7 +199,7 @@ class TestEquivalence:
     def test_combined_dynamic_match(self):
         """Ephemeral + Plugin + SparkGraph: all three combined correctly."""
         mock_manager = MagicMock()
-        mock_manager.build_recall_block.return_value = "SparkGraph recall"
+        mock_manager.build_recall_block.return_value = ("SparkGraph recall", 0)
 
         agent = self._make_mock_agent(
             ephemeral_system_prompt="Ephemeral prompt",
@@ -249,7 +249,7 @@ class TestEquivalence:
     def test_sparkgraph_skipped_when_no_user_message(self):
         """Original skips sparkgraph when user_message is falsy; assembler calls it."""
         mock_manager = MagicMock()
-        mock_manager.build_recall_block.return_value = ""
+        mock_manager.build_recall_block.return_value = ("", 0)
 
         agent = self._make_mock_agent(
             sparkgraph_enabled=True,

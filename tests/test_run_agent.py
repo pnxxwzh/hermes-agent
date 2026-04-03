@@ -1723,7 +1723,8 @@ class TestRunConversation:
         agent._sparkgraph_enabled = True
         agent._sparkgraph_manager = MagicMock()
         agent._sparkgraph_manager.build_recall_block.return_value = (
-            "[SparkGraph Recall]\n- [FACT] socksio may be required for SOCKS proxy support"
+            "[SparkGraph Recall]\n- [FACT] socksio may be required for SOCKS proxy support",
+            120,
         )
         original_cached = agent._cached_system_prompt
 
@@ -1753,7 +1754,8 @@ class TestRunConversation:
         agent._sparkgraph_manager.build_recall_block.return_value = (
             "[SparkGraph Recall]\n"
             "Use these retrieved knowledge points if they help answer the current turn.\n"
-            "- [ISSUE] PostgreSQL 连接超时时先检查监听地址和 pg_hba.conf"
+            "- [ISSUE] PostgreSQL 连接超时时先检查监听地址和 pg_hba.conf",
+            180,
         )
         agent._print_fn = MagicMock()
 
@@ -1776,7 +1778,7 @@ class TestRunConversation:
         self._setup_agent(agent)
         agent._sparkgraph_enabled = True
         agent._sparkgraph_manager = MagicMock()
-        agent._sparkgraph_manager.build_recall_block.return_value = ""
+        agent._sparkgraph_manager.build_recall_block.return_value = ("", 0)
         original_cached = agent._cached_system_prompt
 
         resp = _mock_response(content="Final answer", finish_reason="stop")

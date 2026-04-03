@@ -162,7 +162,7 @@ class TestSparkGraphRecallSource:
     def test_sparkgraph_with_recall(self):
         """T8.10: normal call returns recall block."""
         mock_manager = MagicMock()
-        mock_manager.build_recall_block.return_value = "[SparkGraph Recall]"
+        mock_manager.build_recall_block.return_value = ("[SparkGraph Recall]", 0)
         src = SparkGraphRecallSource(
             sparkgraph_manager=mock_manager,
             sparkgraph_enabled=True,
@@ -176,7 +176,7 @@ class TestSparkGraphRecallSource:
     def test_sparkgraph_empty_recall(self):
         """T8.11: block="" -> []. """
         mock_manager = MagicMock()
-        mock_manager.build_recall_block.return_value = ""
+        mock_manager.build_recall_block.return_value = ("", 0)
         src = SparkGraphRecallSource(
             sparkgraph_manager=mock_manager,
             sparkgraph_enabled=True,
@@ -187,7 +187,7 @@ class TestSparkGraphRecallSource:
     def test_sparkgraph_metadata(self):
         """T8.12: recall_injected flag in metadata."""
         mock_manager = MagicMock()
-        mock_manager.build_recall_block.return_value = "[Recall]"
+        mock_manager.build_recall_block.return_value = ("[Recall]", 0)
         src = SparkGraphRecallSource(
             sparkgraph_manager=mock_manager,
             sparkgraph_enabled=True,
@@ -198,7 +198,7 @@ class TestSparkGraphRecallSource:
     def test_sparkgraph_empty_metadata(self):
         """T8.x: empty recall -> recall_injected=False."""
         mock_manager = MagicMock()
-        mock_manager.build_recall_block.return_value = ""
+        mock_manager.build_recall_block.return_value = ("", 0)
         src = SparkGraphRecallSource(
             sparkgraph_manager=mock_manager,
             sparkgraph_enabled=True,
@@ -209,7 +209,7 @@ class TestSparkGraphRecallSource:
     def test_sparkgraph_user_message_passed(self):
         """T8.x: user_message passed to build_recall_block."""
         mock_manager = MagicMock()
-        mock_manager.build_recall_block.return_value = ""
+        mock_manager.build_recall_block.return_value = ("", 0)
         src = SparkGraphRecallSource(
             sparkgraph_manager=mock_manager,
             sparkgraph_enabled=True,

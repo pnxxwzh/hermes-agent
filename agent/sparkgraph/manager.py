@@ -42,12 +42,12 @@ class SparkGraphManager:
         *,
         max_nodes: int | None = None,
         max_chars: int | None = None,
-    ) -> str:
+    ) -> tuple[str, int]:
         if not self.config.recall.enabled:
             return ""
         store = self.ensure_store()
         recall_cfg = self.config.recall
-        nodes, edges = recall_nodes(
+        nodes, edges, token_estimate = recall_nodes(
             store,
             query=query,
             config=RecallConfig(
@@ -66,7 +66,7 @@ class SparkGraphManager:
                 store.mark_recalled(included_ids)
             except Exception:
                 pass
-        return block
+        return block, token_estimate
 
     def runtime_snapshot(self, *, probe_fn=None, probe_enabled: bool = True) -> SparkGraphRuntimeSnapshot:
         return build_runtime_snapshot(self.config, probe_fn=probe_fn, probe_enabled=probe_enabled)

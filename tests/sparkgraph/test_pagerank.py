@@ -241,7 +241,7 @@ class TestRecallWithPPR:
             from_id=direct_id, to_id=related_id, edge_type=EdgeType.RELATED_TO
         )
 
-        nodes, _edges = recall_nodes(
+        nodes, _edges, _ = recall_nodes(
             store,
             query="elasticsearch field mapping",
             config=RecallConfig(
@@ -265,7 +265,7 @@ class TestRecallWithPPR:
             from_id=direct_id, to_id=indirect_id, edge_type=EdgeType.RELATED_TO
         )
 
-        nodes, _edges = recall_nodes(
+        nodes, _edges, _ = recall_nodes(
             store,
             query="redis remote access",
             config=RecallConfig(
@@ -277,7 +277,7 @@ class TestRecallWithPPR:
     def test_empty_graph_no_crash(self, tmp_path):
         """Empty graph recall returns [], does not raise."""
         store = SparkGraphStore(tmp_path / "sg.db")
-        nodes, _edges = recall_nodes(
+        nodes, _edges, _ = recall_nodes(
             store, query="anything", config=RecallConfig(max_nodes=4)
         )
         assert nodes == []
@@ -328,7 +328,7 @@ class TestRecallWithPPR:
         store.insert_edge(from_id=nid_a, to_id=nid_b, edge_type=EdgeType.RELATED_TO)
         store.insert_edge(from_id=nid_b, to_id=nid_c, edge_type=EdgeType.RELATED_TO)
 
-        nodes, _edges = recall_nodes(
+        nodes, _edges, _ = recall_nodes(
             store,
             query="docker deployment",
             config=RecallConfig(
@@ -352,7 +352,7 @@ class TestRecallWithPPR:
                 confidence=0.50,
             )
         )
-        nodes, _edges = recall_nodes(
+        nodes, _edges, _ = recall_nodes(
             store, query="deprecated", config=RecallConfig(max_nodes=4)
         )
         # deprecated nodes are never recalled
@@ -365,7 +365,7 @@ class TestRecallWithPPR:
         other_id = _insert_active(store, "other", "fact:other")
         store.insert_edge(from_id=nid, to_id=other_id, edge_type=EdgeType.RELATED_TO)
 
-        nodes, _edges = recall_nodes(
+        nodes, _edges, _ = recall_nodes(
             store,
             query="shared",
             config=RecallConfig(

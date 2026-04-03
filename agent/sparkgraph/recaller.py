@@ -229,16 +229,20 @@ def recall_nodes(
     query: str,
     config: RecallConfig | None = None,
     embedding_config: SparkGraphEmbeddingConfig | None = None,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """两条通道召回：精确（vector+FTS）+ 图扩展（1-hop active）。
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
+    """三条通道召回：explicit优先 + 精确（FTS+向量）+ 图扩展（1-hop）。
 
     无 CANDIDATE，无 evidence，无 L3 COLD。
     所有召回节点均为 active，排序由 recall_priority_score 决定。
+
+    Returns:
+        (nodes, edges, token_estimate)
+        token_estimate = sum(len(s.summary) + len(s.detail)) / 3 ≈ token 数
     """
     config = config or RecallConfig()
     query = (query or "").strip()
     if not query or _is_low_signal_query(query):
-        return [], []
+        return [], [], 0
 
     # ── Channel 1: 精确搜索（FTS + 向量） ────────────────────────────
     raw_fts = store.search_nodes(
@@ -266,6 +270,17 @@ def recall_nodes(
                 _merge_hit(merged, node, match_priority=1)
                 graph_hits.append(node)
 
+    # ── Channel 3: explicit/manual 优先补充 ─────────────────────────
+    explicit_kinds = {"explicit", "manual"}
+    existing_ids = {n["id"] for n in merged.values() if n.get("id")}
+    explicit_nodes = store.get_by_source_kind(
+        list(explicit_kinds), query, limit=config.search_limit
+    )
+    for node in explicit_nodes:
+        if node.get("id") not in existing_ids:
+            _merge_hit(merged, node, match_priority=4)  # 高优先级
+            existing_ids.add(node["id"])
+
     # ── 排序 ─────────────────────────────────────────────────────────
     all_nodes = list(merged.values())
     use_ppr = bool(graph_hits)
@@ -286,4 +301,10 @@ def recall_nodes(
         except Exception:
             edges = []
 
-    return final, edges
+    # ── token 估算 ──────────────────────────────────────────────────
+    token_estimate = int(sum(
+        len(str(n.get("summary", ""))) + len(str(n.get("detail", "")))
+        for n in final
+    ) / 3)
+
+    return final, edges, token_estimate

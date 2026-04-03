@@ -78,6 +78,8 @@ def initialize_schema(conn: sqlite3.Connection) -> None:
             source_kind TEXT NOT NULL,
             canonical_key TEXT NOT NULL,
             meta TEXT NOT NULL DEFAULT '{{}}',
+            source_sessions TEXT NOT NULL DEFAULT '[]',
+            default_inject INTEGER NOT NULL DEFAULT 1,
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL,
             last_recalled_at INTEGER NOT NULL DEFAULT 0,
@@ -173,6 +175,14 @@ def initialize_schema(conn: sqlite3.Connection) -> None:
     if "validated_count" not in node_columns:
         conn.execute(
             f"ALTER TABLE {NODES_TABLE} ADD COLUMN validated_count INTEGER NOT NULL DEFAULT 0"
+        )
+    if "source_sessions" not in node_columns:
+        conn.execute(
+            f"ALTER TABLE {NODES_TABLE} ADD COLUMN source_sessions TEXT NOT NULL DEFAULT '[]'"
+        )
+    if "default_inject" not in node_columns:
+        conn.execute(
+            f"ALTER TABLE {NODES_TABLE} ADD COLUMN default_inject INTEGER NOT NULL DEFAULT 1"
         )
 
     # ── Migration v5: drop stability and reuse_score (no longer used) ─────────
