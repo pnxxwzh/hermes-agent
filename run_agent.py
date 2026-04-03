@@ -6790,10 +6790,15 @@ class AIAgent:
                 _sparkgraph_turn_context = "\n".join(
                     c.content for c in dynamic_result.dynamic_chunks if c.source == "sparkgraph_recall"
                 )
+                # Persist to instance so the next turn's fallback path can find them
+                self._plugin_turn_context = _plugin_turn_context
+                self._sparkgraph_turn_context = _sparkgraph_turn_context
             else:
                 # Fallback to original per-source logic
                 if self.ephemeral_system_prompt:
                     effective_system = (effective_system + "\n\n" + self.ephemeral_system_prompt).strip()
+                _plugin_turn_context = getattr(self, "_plugin_turn_context", "") or ""
+                _sparkgraph_turn_context = getattr(self, "_sparkgraph_turn_context", "") or ""
                 if _plugin_turn_context:
                     effective_system = (effective_system + "\n\n" + _plugin_turn_context).strip()
                 if _sparkgraph_turn_context:

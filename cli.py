@@ -1346,10 +1346,74 @@ class HermesCLI:
             return "class:status-bar-warn"
         return "class:status-bar-good"
 
-    def _build_context_bar(self, percent_used: Optional[int], width: int = 10) -> str:
+    # ANSI color escapes for embedded bar segment coloring
+    _BAR_ANSI = {
+        "stable": "\033[36m",        # cyan
+        "memory": "\033[32m",        # green
+        "user_profile": "\033[34m",  # blue
+        "skills": "\033[33m",        # yellow
+        "project_context": "\033[38;5;208m",  # orange (#FF9500)
+        "sparkgraph_recall": "\033[35m",  # purple
+        "ephemeral": "\033[90m",     # bright_black
+        "plugin": "\033[90m",         # gray
+        "honcho_static": "\033[95m",  # magenta
+        "honcho_turn": "\033[95m",    # magenta
+        "tool_guidance": "\033[96m",  # bright_cyan
+        "tool_use_enforcement": "\033[96m",  # bright_cyan
+        "identity": "\033[94m",       # bright_blue
+        "system_message": "\033[92m",  # bright_green
+        "time_platform": "\033[90m",  # bright_black
+    }
+    _BAR_RESET = "\033[0m"
+
+    def _build_context_bar(
+        self,
+        percent_used: Optional[int],
+        width: int = 10,
+        source_metrics=None,
+    ) -> str:
+        """Build a plain-text context bar string (backward-compatible).
+
+        When source_metrics is provided and non-empty, filled blocks are
+        colored via ANSI escapes keyed by source name so each source gets a
+        distinct colour in the "used" portion of the bar.
+        """
         safe_percent = max(0, min(100, percent_used or 0))
         filled = round((safe_percent / 100) * width)
-        return f"[{('█' * filled) + ('░' * max(0, width - filled))}]"
+        empty = max(0, width - filled)
+
+        if not source_metrics or not source_metrics.by_source:
+            # No source breakdown: plain monochrome bar
+            return f"[{('█' * filled) + ('░' * empty)}]"
+
+        # Aggregate tokens per source
+        aggregated = {}
+        for sm in source_metrics.by_source:
+            bucket = aggregated.setdefault(sm.source, 0)
+            aggregated[sm.source] = bucket + sm.rough_tokens
+
+        total = source_metrics.total_estimated_tokens
+        if total <= 0:
+            return f"[{('█' * filled) + ('░' * empty)}]"
+
+        # Build per-source token→block mapping
+        source_blocks: list[tuple[str, int]] = []
+        for src, tokens in aggregated.items():
+            blocks = max(1, round((tokens / total) * filled))
+            source_blocks.append((src, min(blocks, filled - sum(b for _, b in source_blocks))))
+        # Last-resort fill for rounding errors
+        assigned = sum(b for _, b in source_blocks)
+        if assigned < filled:
+            source_blocks.append(("stable", filled - assigned))
+
+        # Build colored bar string
+        reset = self._BAR_RESET
+        parts = ["["]
+        for src, blocks in source_blocks:
+            color = self._BAR_ANSI.get(src, "")
+            parts.append(f"{color}{'█' * blocks}{reset}")
+        parts.append("\033[90m" + "░" * empty + reset + "]")
+        return "".join(parts)
 
     def _get_status_bar_snapshot(self) -> Dict[str, Any]:
         model_name = self.model or "unknown"
@@ -1407,8 +1471,10 @@ class HermesCLI:
     def _status_bar_display_width(text: str) -> int:
         """Return terminal cell width for status-bar text.
 
-        Strips ANSI color codes (e.g. [green]...[/]) before measuring,
-        since get_cwidth counts them as literal characters.
+        Strips two kinds of color codes before measuring so they are not
+        counted as display cells:
+          - prompt_toolkit markup: [colorname]...[/colorname]
+          - raw ANSI escapes:      \\033[...m  (e.g. \\033[36m)
         """
         try:
             import re
@@ -1416,11 +1482,17 @@ class HermesCLI:
         except Exception:
             return len(text or "")
 
-        # Strip ANSI color codes iteratively: [colorname]...[/color]
+        # Strip raw ANSI escapes first: \033[K where K is any CSI sequence
+        # Covers SGR codes like \033[36m and \033[1;38;2;255;215;0m
+        text = re.sub(r'\x1b\[[0-9;]*m', '', text)
+        # Strip prompt_toolkit markup iteratively (nested tags)
+        # Be specific: only strip tags whose content starts with a letter
+        # (e.g. [green], [/bold]) so literal bar brackets like [██░░░░░░░░]
+        # are preserved as display characters.
         prev = None
         while prev != text:
             prev = text
-            text = re.sub(r'\[/?[^\]]*\]', '', text)
+            text = re.sub(r'\[/?[a-zA-Z][^\]]*\]', '', text)
         return get_cwidth(text or "")
 
     @classmethod
@@ -1532,10 +1604,10 @@ class HermesCLI:
                         context_label = "ctx --"
 
                     bar_style = self._status_bar_context_style(percent)
-                    context_bar = self._build_context_bar(percent)
-
-                    # Phase 2: get source proportion label for enriched display
                     source_metrics = self._get_current_context_metrics()
+
+                    # Phase 2: build source-colored context bar + optional enriched label
+                    context_bar = self._build_context_bar(percent, source_metrics=source_metrics)
                     source_label = ""
                     if self._show_context_breakdown and source_metrics:
                         source_label = self._render_source_bar(source_metrics, width=30)
@@ -1572,8 +1644,32 @@ class HermesCLI:
 
             total_width = sum(self._status_bar_display_width(text) for _, text in frags)
             if total_width > width:
-                plain_text = "".join(text for _, text in frags)
-                trimmed = self._trim_status_bar_text(plain_text, width)
+                # Strategy: first try dropping the source label if present
+                if source_label:
+                    frags_no_source = [
+                        ("class:status-bar", " ⚕ "),
+                        ("class:status-bar-strong", snapshot["model_short"]),
+                        ("class:status-bar-dim", " │ "),
+                        ("class:status-bar-dim", context_label),
+                        ("class:status-bar-dim", " │ "),
+                        (bar_style, context_bar),
+                        ("class:status-bar-dim", " "),
+                        (bar_style, percent_label),
+                        ("class:status-bar-dim", " │ "),
+                        ("class:status-bar-dim", duration_label),
+                        ("class:status-bar", " "),
+                    ]
+                    if sum(self._status_bar_display_width(t) for _, t in frags_no_source) <= width:
+                        return frags_no_source
+                # Last resort: plain text, no ANSI codes in bar, just trimmed
+                plain_bar = self._build_context_bar(percent)
+                plain_parts = [
+                    " ⚕ ", snapshot["model_short"], " │ ",
+                    context_label, " │ ", plain_bar, " ",
+                    percent_label if not source_label else enriched_label,
+                    " │ ", duration_label,
+                ]
+                trimmed = self._trim_status_bar_text("".join(plain_parts), width)
                 return [("class:status-bar", trimmed)]
             return frags
         except Exception:
