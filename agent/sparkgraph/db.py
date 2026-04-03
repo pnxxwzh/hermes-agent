@@ -8,7 +8,7 @@ from pathlib import Path
 
 from agent.sparkgraph.config import SparkGraphConfig, resolve_sparkgraph_db_path, sparkgraph_home
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 MIGRATIONS_TABLE = "_migrations"
 NODES_TABLE = "sg_nodes"
@@ -18,9 +18,9 @@ VECTORS_TABLE = "sg_vectors"
 NODES_FTS_TABLE = "sg_nodes_fts"
 
 NODE_TYPES = ("FACT", "PREFERENCE", "ISSUE", "RESOURCE", "DECISION")
-NODE_STATUSES = ("candidate", "active", "deprecated")
+NODE_STATUSES = ("active", "deprecated")
 EDGE_TYPES = ("RELATED_TO", "SOLVES", "DEPENDS_ON", "CONFLICTS_WITH", "DERIVED_FROM", "APPLIES_TO")
-SOURCE_KINDS = ("auto", "explicit", "manual", "reflection", "review", "flush", "shadow", "recall")
+SOURCE_KINDS = ("auto", "explicit", "manual", "reflection", "review", "flush", "shadow")
 
 
 def ensure_sparkgraph_dir(hermes_home: Path | None = None) -> Path:
@@ -171,6 +171,10 @@ def initialize_schema(conn: sqlite3.Connection) -> None:
     if "last_recalled_at" not in node_columns:
         conn.execute(
             f"ALTER TABLE {NODES_TABLE} ADD COLUMN last_recalled_at INTEGER NOT NULL DEFAULT 0"
+        )
+    if "validated_count" not in node_columns:
+        conn.execute(
+            f"ALTER TABLE {NODES_TABLE} ADD COLUMN validated_count INTEGER NOT NULL DEFAULT 0"
         )
 
     # ── Migration v3: add SOLVES to sg_edges CHECK constraint ──────────────────

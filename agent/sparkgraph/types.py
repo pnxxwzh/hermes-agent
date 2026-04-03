@@ -23,19 +23,10 @@ class EdgeType(str, Enum):
 
 
 class NodeStatus(str, Enum):
-    CANDIDATE = "candidate"
-    ACTIVE = "active"
-    DEPRECATED = "deprecated"
+    """两状态：active（可召回）/ deprecated（不可召回）。
 
-
-class RecallChannel(str, Enum):
-    """三条召回通道，对应 recall_eligibility 的三个层次。
-
-    L1 DIRECT — 精准匹配，含 candidate（需 evidence>=1）
-    L2 GRAPH  — 图扩展，active-only
-    L3 COLD   — 零 evidence candidate 兜底
+    无 CANDIDATE 中间态——来源即命运，写入时直接决定状态。
     """
 
-    DIRECT = "direct"
-    GRAPH = "graph"
-    COLD = "cold"
+    ACTIVE = "active"
+    DEPRECATED = "deprecated"

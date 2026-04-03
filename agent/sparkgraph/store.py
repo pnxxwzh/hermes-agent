@@ -15,7 +15,6 @@ from typing import Any
 from agent.sparkgraph.config import SparkGraphConfig
 from agent.sparkgraph.db import (
     EDGES_TABLE,
-    EVIDENCE_TABLE,
     NODES_FTS_TABLE,
     NODES_TABLE,
     VECTORS_TABLE,
@@ -33,7 +32,7 @@ class SparkGraphNodeInput:
     canonical_key: str
     source_kind: str
     detail: str = ""
-    status: NodeStatus = NodeStatus.CANDIDATE
+    status: NodeStatus = NodeStatus.ACTIVE
     confidence: float = 0.0
     stability: float = 0.0
     reuse_score: float = 0.0
@@ -62,12 +61,14 @@ class SparkGraphStore:
     def insert_node(self, item: SparkGraphNodeInput) -> str:
         now = int(time.time())
         node_id = uuid.uuid4().hex
+        validated_count = item.meta.get("validated_count", 0) if item.meta else 0
         self._conn.execute(
             f"""
             INSERT INTO {NODES_TABLE} (
                 id, type, summary, detail, status, confidence, stability,
-                reuse_score, source_kind, canonical_key, meta, created_at, updated_at, last_recalled_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                reuse_score, source_kind, canonical_key, meta, created_at, updated_at,
+                last_recalled_at, validated_count
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 node_id,
@@ -84,6 +85,7 @@ class SparkGraphStore:
                 now,
                 now,
                 0,
+                validated_count,
             ),
         )
         self._conn.commit()
@@ -117,36 +119,6 @@ class SparkGraphStore:
         self._conn.commit()
         return edge_id
 
-    def append_evidence(
-        self,
-        *,
-        node_id: str,
-        session_id: str,
-        turn_index: int,
-        source_text: str,
-        source_kind: str,
-    ) -> bool:
-        evidence_id = uuid.uuid4().hex
-        source_hash = hashlib.sha256(source_text.encode("utf-8")).hexdigest()
-        cursor = self._conn.execute(
-            f"""
-            INSERT OR IGNORE INTO {EVIDENCE_TABLE} (
-                id, node_id, session_id, turn_index, source_hash, source_kind, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                evidence_id,
-                node_id,
-                session_id,
-                turn_index,
-                source_hash,
-                source_kind,
-                int(time.time()),
-            ),
-        )
-        self._conn.commit()
-        return cursor.rowcount > 0
-
     def get_node(self, node_id: str):
         row = self._conn.execute(
             f"SELECT * FROM {NODES_TABLE} WHERE id = ?",
@@ -154,12 +126,23 @@ class SparkGraphStore:
         ).fetchone()
         return dict(row) if row else None
 
-    def count_evidence(self, node_id: str) -> int:
-        row = self._conn.execute(
-            "SELECT COUNT(*) AS count FROM sg_evidence WHERE node_id = ?",
-            (node_id,),
-        ).fetchone()
-        return int(row["count"]) if row else 0
+    def increment_validated_count(self, node_ids: list[str], *, now_ts: int | None = None) -> None:
+        """命中的节点 validated_count++ + recall_hits++（meta）。"""
+        if not node_ids:
+            return
+        stamp = int(now_ts or time.time())
+        for node_id in node_ids:
+            current = self.get_node(node_id)
+            if not current:
+                continue
+            meta = json.loads(current.get("meta") or "{}")
+            meta["recall_hits"] = int(meta.get("recall_hits", 0)) + 1
+            self._conn.execute(
+                f"""UPDATE {NODES_TABLE} SET validated_count = validated_count + 1,
+                    last_recalled_at = ?, meta = ?, updated_at = updated_at WHERE id = ?""",
+                (stamp, json.dumps(meta, sort_keys=True), node_id),
+            )
+        self._conn.commit()
 
     def count_nodes(self, *, status: str | None = None) -> int:
         sql = f"SELECT COUNT(*) AS count FROM {NODES_TABLE}"
