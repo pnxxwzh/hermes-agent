@@ -1371,12 +1371,15 @@ class HermesCLI:
         percent_used: Optional[int],
         width: int = 10,
         source_metrics=None,
+        strip_ansi: bool = False,
     ) -> str:
-        """Build a plain-text context bar string (backward-compatible).
+        """Build a context bar string.
 
-        When source_metrics is provided and non-empty, filled blocks are
-        colored via ANSI escapes keyed by source name so each source gets a
-        distinct colour in the "used" portion of the bar.
+        When strip_ansi=True (for use with prompt_toolkit FormattedTextControl
+        which applies its own class-based styling), ANSI colour codes are
+        omitted from the returned string so they are not rendered as literal
+        text.  When strip_ansi=False (backward-compatible plain-text path),
+        embedded ANSI codes are included.
         """
         safe_percent = max(0, min(100, percent_used or 0))
         filled = round((safe_percent / 100) * width)
@@ -1396,6 +1399,12 @@ class HermesCLI:
         if total <= 0:
             return f"[{('█' * filled) + ('░' * empty)}]"
 
+        # When context percent rounds to 0 but we have source tokens, force at
+        # least one filled block so the bar is not all-empty while content exists.
+        if filled == 0 and total > 0:
+            filled = 1
+            empty = max(0, width - filled)
+
         # Build per-source token→block mapping
         source_blocks: list[tuple[str, int]] = []
         for src, tokens in aggregated.items():
@@ -1406,13 +1415,20 @@ class HermesCLI:
         if assigned < filled:
             source_blocks.append(("stable", filled - assigned))
 
-        # Build colored bar string
-        reset = self._BAR_RESET
+        # Build bar string (plain text when strip_ansi, coloured otherwise)
         parts = ["["]
         for src, blocks in source_blocks:
-            color = self._BAR_ANSI.get(src, "")
-            parts.append(f"{color}{'█' * blocks}{reset}")
-        parts.append("\033[90m" + "░" * empty + reset + "]")
+            if strip_ansi:
+                parts.append('█' * blocks)
+            else:
+                color = self._BAR_ANSI.get(src, "")
+                reset = self._BAR_RESET
+                parts.append(f"{color}{'█' * blocks}{reset}")
+        if strip_ansi:
+            parts.append("░" * empty + "]")
+        else:
+            reset = self._BAR_RESET
+            parts.append("\033[90m" + "░" * empty + reset + "]")
         return "".join(parts)
 
     def _get_status_bar_snapshot(self) -> Dict[str, Any]:
@@ -1607,7 +1623,7 @@ class HermesCLI:
                     source_metrics = self._get_current_context_metrics()
 
                     # Phase 2: build source-colored context bar + optional enriched label
-                    context_bar = self._build_context_bar(percent, source_metrics=source_metrics)
+                    context_bar = self._build_context_bar(percent, source_metrics=source_metrics, strip_ansi=True)
                     source_label = ""
                     if self._show_context_breakdown and source_metrics:
                         source_label = self._render_source_bar(source_metrics, width=30)
