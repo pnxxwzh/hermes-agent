@@ -5450,6 +5450,15 @@ class AIAgent:
                             self._honcho_save_user_observation(args.get("content", ""))
                         if not self.quiet_mode:
                             print(f"  🧠 Memory flush: saved to {args.get('target', 'memory')}")
+                        # Mirror durable memory writes to SG during flush (same as main flow)
+                        if sparkgraph_available and flush_target == "memory" and args.get("action") in {"add", "replace"}:
+                            try:
+                                result_str = json.dumps(result) if isinstance(result, dict) else result
+                                mirrored = self._mirror_memory_write_to_sparkgraph(args, result_str)
+                                if mirrored and not self.quiet_mode:
+                                    print(f"  {_get_cute_tool_message_impl('sparkgraph_record', {'items': [json.loads(result_str).get('content', '')]}, 0.0, result=mirrored)}")
+                            except Exception:
+                                pass
                     except Exception as e:
                         logger.debug("Memory flush tool call failed: %s", e)
                 elif tc.function.name == "sparkgraph_record" and sparkgraph_available:
@@ -6803,6 +6812,12 @@ class AIAgent:
                     effective_system = (effective_system + "\n\n" + _plugin_turn_context).strip()
                 if _sparkgraph_turn_context:
                     effective_system = (effective_system + "\n\n" + _sparkgraph_turn_context).strip()
+
+            # Display ✨ recall hint when SparkGraph recall was injected
+            if _sparkgraph_turn_context:
+                recall_hint = _format_sparkgraph_recall_message(_sparkgraph_turn_context)
+                if recall_hint:
+                    self._vprint(recall_hint)
 
             if effective_system:
                 api_messages = [{"role": "system", "content": effective_system}] + api_messages
