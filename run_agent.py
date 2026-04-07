@@ -6689,7 +6689,10 @@ class AIAgent:
         
         # Clear any stale interrupt state at start
         self.clear_interrupt()
-        
+
+        # Show SparkGraph recall hint only once per turn (not on every tool iteration)
+        _sparkgraph_recall_shown = False
+
         while api_call_count < self.max_iterations and self.iteration_budget.remaining > 0:
             # Reset per-turn checkpoint dedup so each iteration can take one snapshot
             self._checkpoint_mgr.new_turn()
@@ -6813,11 +6816,12 @@ class AIAgent:
                 if _sparkgraph_turn_context:
                     effective_system = (effective_system + "\n\n" + _sparkgraph_turn_context).strip()
 
-            # Display ✨ recall hint when SparkGraph recall was injected
-            if _sparkgraph_turn_context:
+            # Display ✨ recall hint only once per turn (not on every tool iteration)
+            if _sparkgraph_turn_context and not _sparkgraph_recall_shown:
                 recall_hint = _format_sparkgraph_recall_message(_sparkgraph_turn_context)
                 if recall_hint:
                     self._vprint(recall_hint)
+                    _sparkgraph_recall_shown = True
 
             if effective_system:
                 api_messages = [{"role": "system", "content": effective_system}] + api_messages
