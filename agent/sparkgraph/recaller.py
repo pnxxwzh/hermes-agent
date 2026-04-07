@@ -14,6 +14,7 @@ default_inject=0 的节点在 recall 输出层被过滤（不可注入）。
 from __future__ import annotations
 
 import json as _json
+import logging as _logging
 import time
 from typing import Any
 
@@ -30,6 +31,7 @@ LRFU_FREQ_W = 0.4           # Frequency weight in LRFU composite score
 LRFU_RECENCY_W = 0.6       # Recency weight in LRFU composite score
 LRFU_DECAY_BASE = 0.95     # Hourly decay factor for recency component
 _POOLS: dict[str, dict[str, dict[str, Any]]] = {}  # session_id → node_id → PoolEntry
+_log = _logging.getLogger(__name__)
 
 
 class PoolEntry(dict):
@@ -314,6 +316,8 @@ def _rank_nodes(
 ) -> list[dict[str, Any]]:
     if use_ppr and seed_ids and store:
         candidate_ids = [str(n.get("id", "")) for n in nodes if n.get("id")]
+        if not candidate_ids:
+            return _rank_legacy(nodes)
         try:
             ppr_scores = personalized_pagerank(
                 store,
@@ -404,6 +408,8 @@ def recall_nodes(
         status=NodeStatus.ACTIVE.value,
         limit=config.search_limit,
     )
+    if not embedding_enabled(embedding_config):
+        _log.info("SparkGraph embedding disabled, falling back to FTS-only recall")
     raw_vector = _vector_search(store, query, config, embedding_config) if embedding_enabled(embedding_config) else []
 
     # 合并去重
@@ -462,7 +468,7 @@ def recall_nodes(
 
     # ── 排序 ─────────────────────────────────────────────────────────
     all_nodes = list(merged.values())
-    use_ppr = bool(graph_hits)
+    use_ppr = bool(graph_hits) or bool(seed_ids)
     ranked = _rank_nodes(all_nodes, use_ppr=use_ppr, seed_ids=seed_ids, store=store, pool=pool)
 
     final = ranked[: config.max_nodes]

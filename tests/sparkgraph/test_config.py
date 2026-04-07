@@ -46,11 +46,6 @@ def test_parse_sparkgraph_config_rejects_non_boolean_recall_enabled(tmp_path):
         parse_sparkgraph_config({"recall": {"enabled": "yes"}}, hermes_home=tmp_path)
 
 
-def test_parse_sparkgraph_config_rejects_invalid_budget_ratio(tmp_path):
-    with pytest.raises(SparkGraphConfigError, match="recall.budget_ratio"):
-        parse_sparkgraph_config({"recall": {"budget_ratio": 1.5}}, hermes_home=tmp_path)
-
-
 def test_parse_sparkgraph_config_rejects_non_mapping_section(tmp_path):
     with pytest.raises(SparkGraphConfigError, match="sparkgraph.embedding"):
         parse_sparkgraph_config({"embedding": "local"}, hermes_home=tmp_path)

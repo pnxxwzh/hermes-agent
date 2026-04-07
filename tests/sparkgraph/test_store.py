@@ -131,7 +131,7 @@ def test_update_node_scoring_clears_confidence_components(tmp_path):
 
 
 def test_default_inject_flag(tmp_path):
-    """default_inject: explicit/manual→1, reflection/shadow→0, 默认→1."""
+    """default_inject: explicit/manual→1, flush/auto→1, 默认→1. (reflection/shadow now also →1)."""
     store = SparkGraphStore(tmp_path / "sparkgraph" / "default.db")
 
     explicit_id = store.insert_node(

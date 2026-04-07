@@ -6,7 +6,10 @@ deprecated 规则：30天无召回 + validated_count≤1
 
 from __future__ import annotations
 
+import logging as _logging
 import time
+
+_log = _logging.getLogger(__name__)
 
 from agent.sparkgraph.config import SparkGraphEmbeddingConfig
 from agent.sparkgraph.embedding import create_embedding, embedding_content_hash, embedding_enabled
@@ -100,6 +103,8 @@ def run_flush_maintenance(
                 vectors_backfilled += 1
             except Exception:
                 continue
+    else:
+        _log.info("SparkGraph embedding disabled, vector backfill skipped")
 
     result: dict[str, int] = {
         "scanned": scanned,

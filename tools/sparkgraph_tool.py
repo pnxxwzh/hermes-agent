@@ -572,7 +572,7 @@ def sparkgraph_record_tool(
                     source_kind=source_kind,
                     status=score_result.initial_status,
                     confidence=score_result.confidence,
-                    default_inject=source_kind not in {"reflection", "shadow"},
+                    default_inject=True,
                     meta={"source_kind": source_kind, "source_sessions": [session_id] if session_id else []},
                 )
             )
@@ -605,7 +605,7 @@ def sparkgraph_record_tool(
                     source_kind=source_kind,
                     status=score_result.initial_status,
                     confidence=score_result.confidence,
-                    default_inject=source_kind not in {"reflection", "shadow"},
+                    default_inject=True,
                     meta={"source_kind": source_kind, "source_sessions": [session_id] if session_id else []},
                 )
             )

@@ -1090,6 +1090,7 @@ class AIAgent:
             self._sparkgraph_enabled = False
             self._sparkgraph_manager = None
             self._sparkgraph_store = None
+        self._sparkgraph_review_enabled = bool(_agent_cfg.get("sparkgraph_review", False))
 
         # Honcho AI-native memory (cross-session user modeling)
         # Reads $HERMES_HOME/honcho.json (instance) or ~/.honcho/config.json (global).
@@ -1627,7 +1628,9 @@ class AIAgent:
         else:
             prompt = self._SKILL_REVIEW_PROMPT
 
-        if review_memory and self._sparkgraph_enabled:
+        if self._sparkgraph_enabled and (
+            review_memory or self._sparkgraph_review_enabled
+        ):
             prompt += self._SPARKGRAPH_REVIEW_PROMPT
         return prompt
 
@@ -1639,6 +1642,8 @@ class AIAgent:
         the default toolsets.
         """
         if not self._sparkgraph_enabled:
+            return False
+        if not self._sparkgraph_review_enabled:
             return False
         if not getattr(review_agent, "_sparkgraph_enabled", False):
             return False

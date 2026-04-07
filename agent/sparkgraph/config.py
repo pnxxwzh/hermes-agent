@@ -16,7 +16,6 @@ DEFAULT_SPARKGRAPH_CONFIG: Dict[str, Any] = {
         "enabled": True,
         "max_items": 4,
         "max_related": 4,
-        "budget_ratio": 0.12,
         "max_chars": 1800,
     },
     "embedding": {
@@ -40,7 +39,6 @@ class SparkGraphRecallConfig:
     enabled: bool = True
     max_items: int = 4
     max_related: int = 4
-    budget_ratio: float = 0.12
     max_chars: int = 1800
 
 
@@ -93,15 +91,6 @@ def _require_bool(value: Any, key: str) -> bool:
     return value
 
 
-def _require_ratio(value: Any, key: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise SparkGraphConfigError(f"sparkgraph.{key} must be a number")
-    numeric = float(value)
-    if numeric <= 0 or numeric > 1:
-        raise SparkGraphConfigError(f"sparkgraph.{key} must be > 0 and <= 1")
-    return numeric
-
-
 def _require_string(value: Any, key: str) -> str:
     if value is None:
         return ""
@@ -133,10 +122,6 @@ def parse_sparkgraph_config(raw: Dict[str, Any] | None, hermes_home: Path | None
         max_related=_require_positive_int(
             recall_raw.get("max_related", DEFAULT_SPARKGRAPH_CONFIG["recall"]["max_related"]),
             "recall.max_related",
-        ),
-        budget_ratio=_require_ratio(
-            recall_raw.get("budget_ratio", DEFAULT_SPARKGRAPH_CONFIG["recall"]["budget_ratio"]),
-            "recall.budget_ratio",
         ),
         max_chars=_require_positive_int(
             recall_raw.get("max_chars", DEFAULT_SPARKGRAPH_CONFIG["recall"]["max_chars"]),

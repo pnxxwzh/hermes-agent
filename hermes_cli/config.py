@@ -210,7 +210,6 @@ DEFAULT_CONFIG = {
             "enabled": True,
             "max_items": 4,
             "max_related": 4,
-            "budget_ratio": 0.12,
             "max_chars": 1800,
         },
         "embedding": {

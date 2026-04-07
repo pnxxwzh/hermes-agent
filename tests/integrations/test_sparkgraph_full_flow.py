@@ -37,7 +37,7 @@ def sg_manager(tmp_path):
         mode="flush_integrated",
         db_path=db_path,
         recall=SparkGraphRecallConfig(enabled=True, max_items=4, max_related=4,
-                                       budget_ratio=0.12, max_chars=1800),
+                                       max_chars=1800),
         embedding=SparkGraphEmbeddingConfig(provider="", model="", base_url="",
                                             api_key="", timeout=20),
     )
@@ -106,28 +106,28 @@ def test_record_all_node_types(sg_manager, store, node_type):
     assert node["status"] == "active"
 
 
-def test_record_reflection_nodes_are_deprecated(sg_manager, store):
-    """source_kind=reflection → status=DEPRECATED, default_inject=0."""
+def test_record_reflection_nodes_are_active(sg_manager, store):
+    """source_kind=reflection → ACTIVE, default_inject=1 (no deprecated source kinds)."""
     r = json.loads(sparkgraph_record_tool(
         items=[_item("Self-reflection note", "FACT", evidence="Introspection")],
         store=store, session_id="s1", turn_index=1,
         source_kind="reflection",
     ))
     node = store.get_node(r["recorded_ids"][0])
-    assert node["status"] == "deprecated"
-    assert node["default_inject"] == 0
+    assert node["status"] == "active"
+    assert node["default_inject"] == 1
 
 
-def test_record_shadow_nodes_are_deprecated(sg_manager, store):
-    """source_kind=shadow → status=DEPRECATED, default_inject=0."""
+def test_record_shadow_nodes_are_active(sg_manager, store):
+    """source_kind=shadow → ACTIVE, default_inject=1 (no deprecated source kinds)."""
     r = json.loads(sparkgraph_record_tool(
         items=[_item("Shadow observation", "ISSUE", evidence="Observed pattern")],
         store=store, session_id="s1", turn_index=1,
         source_kind="shadow",
     ))
     node = store.get_node(r["recorded_ids"][0])
-    assert node["status"] == "deprecated"
-    assert node["default_inject"] == 0
+    assert node["status"] == "active"
+    assert node["default_inject"] == 1
 
 
 def test_record_item_without_evidence_rejected(sg_manager, store):
@@ -319,23 +319,23 @@ def test_recall_empty_query_returns_empty(sg_manager, store):
 
 
 def test_recall_default_inject_0_excluded(sg_manager, store):
-    """default_inject=0 (reflection/shadow) → not in recall output."""
-    # active node
+    """default_inject=0 nodes → not in recall output (reflection nodes now have default_inject=1)."""
+    # active injectable node
     sparkgraph_record_tool(
         items=[_item("pg_hba authentication config", "FACT",
                      evidence="Auth file")],
         store=store, session_id="s1", turn_index=1,
     )
-    # reflection node (default_inject=0, status=deprecated)
+    # reflection node — now created as ACTIVE with default_inject=1 (no deprecated source kinds)
     sparkgraph_record_tool(
-        items=[_item("Shadow: check pg_hba later", "ISSUE",
+        items=[_item("Reflection: check pg_hba later", "ISSUE",
                      evidence="Note to self")],
         store=store, session_id="s2", turn_index=2,
         source_kind="reflection",
     )
 
     block, _ = sg_manager.build_recall_block("pg_hba")
-    assert "Shadow" not in block
+    # Both nodes should appear since reflection now gets default_inject=True
     assert "pg_hba" in block
 
 
@@ -434,9 +434,10 @@ def test_maintenance_deprecates_stale_low_signal_nodes(sg_manager, store):
         store=store, session_id="s1", turn_index=1,
     ))["recorded_ids"][0]
 
-    # Set last_recalled_at to 31 days ago
+    # Set last_recalled_at to 31 days ago with validated_count>0
+    # (validated_count=0 → reference_ts=now → never deprecated)
     old_ts = int(time.time()) - 31 * 86400
-    store.conn.execute("UPDATE sg_nodes SET last_recalled_at=? WHERE id=?",
+    store.conn.execute("UPDATE sg_nodes SET last_recalled_at=?, validated_count=1 WHERE id=?",
                       (old_ts, node_id))
     store.conn.commit()
 

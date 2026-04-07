@@ -3,7 +3,6 @@
 import pytest
 
 from agent.sparkgraph.scoring import (
-    DEPRECATED_SOURCES,
     SOURCE_CONFIDENCE,
     initial_score_for,
     recall_priority_score,
@@ -41,16 +40,16 @@ class TestInitialScoreFor:
             assert result.initial_status == NodeStatus.ACTIVE, f"{kind} should be ACTIVE"
             assert result.confidence == 0.72, f"{kind} confidence should be 0.72"
 
-    def test_reflection_deprecated(self):
-        """TC-S-02: reflection → deprecated, confidence=0.50"""
+    def test_reflection_active(self):
+        """TC-S-02: reflection → ACTIVE (no deprecated source kind), confidence=0.50"""
         result = initial_score_for("reflection")
-        assert result.initial_status == NodeStatus.DEPRECATED
+        assert result.initial_status == NodeStatus.ACTIVE
         assert result.confidence == 0.50
 
-    def test_shadow_deprecated(self):
-        """TC-S-02: shadow → deprecated, confidence=0.50"""
+    def test_shadow_active(self):
+        """TC-S-02: shadow → ACTIVE (no deprecated source kind), confidence=0.50"""
         result = initial_score_for("shadow")
-        assert result.initial_status == NodeStatus.DEPRECATED
+        assert result.initial_status == NodeStatus.ACTIVE
         assert result.confidence == 0.50
 
     def test_unknown_falls_back_to_auto(self):

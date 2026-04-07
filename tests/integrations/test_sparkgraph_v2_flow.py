@@ -46,14 +46,14 @@ class TestSourceKindFate:
         assert any(n["id"] == node_id for n in nodes), "flush node should be immediately recallable"
 
 
-class TestReflectionDeprecated:
-    """TC-I-02: reflection 节点直接 DEPRECATED，不可召回"""
+class TestReflectionActive:
+    """TC-I-02: reflection 节点现在直接 ACTIVE（与 flush/auto 相同）"""
 
-    def test_reflection_node_is_deprecated(self, store):
+    def test_reflection_node_is_active(self, store):
         score = initial_score_for("reflection")
-        assert score.initial_status == NodeStatus.DEPRECATED
+        assert score.initial_status == NodeStatus.ACTIVE
 
-    def test_reflection_node_not_recallable(self, store):
+    def test_reflection_node_is_recallable(self, store):
         from agent.sparkgraph.store import SparkGraphNodeInput
         score = initial_score_for("reflection")
         node_id = store.insert_node(
@@ -67,7 +67,7 @@ class TestReflectionDeprecated:
             )
         )
         nodes, _, _ = recall_nodes(store, query="broken idea")
-        assert not any(n["id"] == node_id for n in nodes), "deprecated node should not be recallable"
+        assert any(n["id"] == node_id for n in nodes), "reflection node should be recallable"
 
 
 class TestValidatedCountIncrement:
@@ -99,23 +99,22 @@ class TestValidatedCountIncrement:
 
 
 class TestDedupUpdatesStatus:
-    """TC-I-04: 去重更新——reflection 节点被 explicit 覆盖后变为 ACTIVE"""
+    """TC-I-04: 去重更新——DEPRECATED 节点被 explicit 覆盖后变为 ACTIVE"""
 
     def test_dedup_overwrites_deprecated_to_active(self, store):
         from agent.sparkgraph.store import SparkGraphNodeInput
         from agent.sparkgraph.dedup import build_canonical_key
 
-        # Insert a deprecated reflection node
+        # Insert a deprecated node directly (no deprecated source kinds exist anymore)
         canonical = build_canonical_key(NodeType.ISSUE, "proxy pac script failure")
-        reflection_score = initial_score_for("reflection")
         deprecated_id = store.insert_node(
             SparkGraphNodeInput(
                 type=NodeType.ISSUE,
                 summary="proxy pac script failure",
                 canonical_key=canonical,
-                source_kind="reflection",
-                status=reflection_score.initial_status,
-                confidence=reflection_score.confidence,
+                source_kind="auto",
+                status=NodeStatus.DEPRECATED,
+                confidence=0.5,
             )
         )
         node = store.get_node(deprecated_id)
@@ -151,10 +150,11 @@ class TestMaintenanceDeprecation:
                 source_kind="auto",
             )
         )
-        # Simulate old last_recalled_at (30+ days ago)
+        # Simulate old last_recalled_at (30+ days ago) with validated_count>0
+        # (validated_count=0 means "never recalled" → reference_ts=now → never deprecated)
         old_ts = int(time.time()) - (31 * 86400)
         store._conn.execute(
-            "UPDATE sg_nodes SET last_recalled_at = ?, updated_at = ? WHERE id = ?",
+            "UPDATE sg_nodes SET last_recalled_at = ?, updated_at = ?, validated_count = 1 WHERE id = ?",
             (old_ts, old_ts, node_id),
         )
         store._conn.commit()

@@ -25,9 +25,6 @@ SOURCE_CONFIDENCE: dict[str, float] = {
     "shadow":    0.50,
 }
 
-# 来源即 deprecated（不参与召回）
-DEPRECATED_SOURCES: set[str] = {"reflection", "shadow"}
-
 # ─── Recall ranking (graph-memory style) ───────────────────────────
 # PPR 权重 1000，validated_count 权重封顶 20×5=100，confidence 权重 100
 _SOURCE_BONUS: dict[str, float] = {
@@ -60,11 +57,6 @@ class InitialScore:
 
 def initial_score_for(source_kind: str) -> InitialScore:
     """来源即命运：无公式，直接查表。"""
-    if source_kind in DEPRECATED_SOURCES:
-        return InitialScore(
-            confidence=SOURCE_CONFIDENCE.get(source_kind, 0.50),
-            initial_status=NodeStatus.DEPRECATED,
-        )
     return InitialScore(
         confidence=SOURCE_CONFIDENCE.get(source_kind, 0.72),
         initial_status=NodeStatus.ACTIVE,
