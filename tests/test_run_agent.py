@@ -925,12 +925,15 @@ class TestToolUseEnforcementConfig:
         agent = self._make_agent(model="openai/gpt-4.1", tool_use_enforcement="auto")
         prompt = agent._build_system_prompt()
         assert TOOL_USE_ENFORCEMENT_GUIDANCE in prompt
+        assert "<mandatory_tool_use>" in prompt
+        assert "<act_dont_ask>" in prompt
 
     def test_auto_injects_for_codex(self):
         from agent.prompt_builder import TOOL_USE_ENFORCEMENT_GUIDANCE
         agent = self._make_agent(model="openai/codex-mini", tool_use_enforcement="auto")
         prompt = agent._build_system_prompt()
         assert TOOL_USE_ENFORCEMENT_GUIDANCE in prompt
+        assert "<mandatory_tool_use>" in prompt
 
     def test_auto_skips_for_claude(self):
         from agent.prompt_builder import TOOL_USE_ENFORCEMENT_GUIDANCE
@@ -943,6 +946,7 @@ class TestToolUseEnforcementConfig:
         agent = self._make_agent(model="anthropic/claude-sonnet-4", tool_use_enforcement=True)
         prompt = agent._build_system_prompt()
         assert TOOL_USE_ENFORCEMENT_GUIDANCE in prompt
+        assert "<mandatory_tool_use>" not in prompt
 
     def test_string_true_forces_for_all_models(self):
         from agent.prompt_builder import TOOL_USE_ENFORCEMENT_GUIDANCE
@@ -3978,3 +3982,45 @@ class TestDeadRetryCode:
             f"Expected 2 occurrences of 'if retry_count >= max_retries:' "
             f"but found {occurrences}"
         )
+
+
+class TestJitteredRetryIntegration:
+    def _setup_agent(self, agent):
+        agent._cached_system_prompt = "You are helpful."
+        agent._use_prompt_caching = False
+        agent.tool_delay = 0
+        agent.compression_enabled = False
+        agent.save_trajectories = False
+
+    def test_invalid_response_retry_uses_jittered_backoff(self, agent):
+        self._setup_agent(agent)
+        bad_resp = SimpleNamespace(choices=[], model="test/model", usage=None)
+        good_resp = _mock_response(content="Recovered", finish_reason="stop")
+        agent.client.chat.completions.create.side_effect = [bad_resp, good_resp]
+
+        with (
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+            patch("run_agent.jittered_backoff", return_value=0.0) as mock_backoff,
+        ):
+            result = agent.run_conversation("hello")
+
+        assert result["completed"] is True
+        mock_backoff.assert_called_once_with(1, base_delay=5.0, max_delay=120.0)
+
+    def test_exception_retry_uses_jittered_backoff(self, agent):
+        self._setup_agent(agent)
+        good_resp = _mock_response(content="Recovered", finish_reason="stop")
+        agent.client.chat.completions.create.side_effect = [RuntimeError("boom"), good_resp]
+
+        with (
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+            patch("run_agent.jittered_backoff", return_value=0.0) as mock_backoff,
+        ):
+            result = agent.run_conversation("hello")
+
+        assert result["completed"] is True
+        mock_backoff.assert_called_once_with(1, base_delay=2.0, max_delay=60.0)

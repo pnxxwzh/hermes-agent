@@ -15,6 +15,7 @@ from agent.anthropic_adapter import (
     build_anthropic_client,
     build_anthropic_kwargs,
     convert_messages_to_anthropic,
+    convert_messages_to_anthropic_metric_view,
     convert_tools_to_anthropic,
     get_anthropic_token_source,
     is_claude_code_token_valid,
@@ -856,6 +857,145 @@ class TestConvertMessages:
         assert isinstance(result[0]["content"], list)
         assert result[0]["content"] == [{"type": "text", "text": "(empty message)"}]
 
+    def test_preserves_signed_thinking_blocks_on_latest_assistant(self):
+        messages = [
+            {
+                "role": "assistant",
+                "content": "Answer",
+                "reasoning_details": [
+                    {"type": "thinking", "thinking": "chain", "signature": "sig-1"},
+                ],
+            }
+        ]
+
+        _, result = convert_messages_to_anthropic(messages)
+        assert result[0]["content"][0]["type"] == "thinking"
+        assert result[0]["content"][0]["signature"] == "sig-1"
+
+    def test_strips_thinking_blocks_from_non_latest_assistant_messages(self):
+        messages = [
+            {
+                "role": "assistant",
+                "content": "Earlier",
+                "reasoning_details": [
+                    {"type": "thinking", "thinking": "old chain", "signature": "sig-old"},
+                ],
+            },
+            {"role": "user", "content": "Continue"},
+            {
+                "role": "assistant",
+                "content": "Latest",
+                "reasoning_details": [
+                    {"type": "thinking", "thinking": "new chain", "signature": "sig-new"},
+                ],
+            },
+        ]
+
+        _, result = convert_messages_to_anthropic(messages)
+        assert result[0]["content"] == [{"type": "text", "text": "Earlier"}]
+        assert result[2]["content"][0]["type"] == "thinking"
+
+    def test_downgrades_unsigned_latest_thinking_to_text(self):
+        messages = [
+            {
+                "role": "assistant",
+                "content": "Final",
+                "reasoning_details": [
+                    {"type": "thinking", "thinking": "unsigned chain"},
+                ],
+            }
+        ]
+
+        _, result = convert_messages_to_anthropic(messages)
+        assert result[0]["content"][0] == {"type": "text", "text": "unsigned chain"}
+        assert result[0]["content"][1] == {"type": "text", "text": "Final"}
+
+    def test_keeps_redacted_thinking_only_when_data_present(self):
+        messages = [
+            {
+                "role": "assistant",
+                "content": "Final",
+                "reasoning_details": [
+                    {"type": "redacted_thinking", "data": "signed-redacted"},
+                    {"type": "redacted_thinking"},
+                ],
+            }
+        ]
+
+        _, result = convert_messages_to_anthropic(messages)
+        assert result[0]["content"][0] == {
+            "type": "redacted_thinking",
+            "data": "signed-redacted",
+        }
+        assert len(result[0]["content"]) == 2
+
+    def test_strips_cache_control_from_preserved_thinking_blocks(self):
+        messages = [
+            {
+                "role": "assistant",
+                "content": "Answer",
+                "reasoning_details": [
+                    {
+                        "type": "thinking",
+                        "thinking": "chain",
+                        "signature": "sig-1",
+                        "cache_control": {"type": "ephemeral"},
+                    },
+                ],
+            }
+        ]
+
+        _, result = convert_messages_to_anthropic(messages)
+        assert "cache_control" not in result[0]["content"][0]
+
+    def test_merging_consecutive_assistant_messages_drops_second_thinking_blocks(self):
+        messages = [
+            {
+                "role": "assistant",
+                "content": "First",
+                "reasoning_details": [
+                    {"type": "thinking", "thinking": "first chain", "signature": "sig-1"},
+                ],
+            },
+            {
+                "role": "assistant",
+                "content": "Second",
+                "reasoning_details": [
+                    {"type": "thinking", "thinking": "second chain", "signature": "sig-2"},
+                ],
+            },
+        ]
+
+        _, result = convert_messages_to_anthropic(messages)
+        assert len(result) == 1
+        thinking_blocks = [
+            block for block in result[0]["content"]
+            if block.get("type") == "thinking"
+        ]
+        assert len(thinking_blocks) == 1
+        assert thinking_blocks[0]["signature"] == "sig-1"
+        assert result[0]["content"][-1] == {"type": "text", "text": "Second"}
+
+    def test_metric_view_materializes_tool_results_as_tool_messages(self):
+        messages = [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "tc_1", "function": {"name": "test", "arguments": "{}"}},
+                ],
+            },
+            {"role": "tool", "tool_call_id": "tc_1", "content": "payload"},
+        ]
+
+        _, metric_messages = convert_messages_to_anthropic_metric_view(messages)
+        assert metric_messages[0]["role"] == "assistant"
+        assert metric_messages[1] == {
+            "role": "tool",
+            "tool_call_id": "tc_1",
+            "content": "payload",
+        }
+
 
 # ---------------------------------------------------------------------------
 # Build kwargs
@@ -1126,6 +1266,9 @@ class TestNormalizeResponse:
         msg, reason = normalize_anthropic_response(self._make_response(blocks))
         assert msg.content == "The answer is 42."
         assert msg.reasoning == "Let me reason about this..."
+        assert msg.reasoning_details == [
+            {"type": "thinking", "thinking": "Let me reason about this..."}
+        ]
 
     def test_stop_reason_mapping(self):
         block = SimpleNamespace(type="text", text="x")

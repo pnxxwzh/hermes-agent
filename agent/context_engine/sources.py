@@ -18,6 +18,7 @@ from agent.prompt_builder import (
     MEMORY_GUIDANCE,
     SESSION_SEARCH_GUIDANCE,
     SKILLS_GUIDANCE,
+    OPENAI_CODEX_TOOL_USE_GUIDANCE,
     TOOL_USE_ENFORCEMENT_GUIDANCE,
     TOOL_USE_ENFORCEMENT_MODELS,
 )
@@ -198,6 +199,12 @@ class ToolUseEnforcementSource:
         # "auto" or any other value — use hardcoded defaults
         return any(p in model_lower for p in TOOL_USE_ENFORCEMENT_MODELS)
 
+    def _extra_guidance(self) -> str:
+        model_lower = self._model.lower()
+        if "gpt" in model_lower or "codex" in model_lower:
+            return OPENAI_CODEX_TOOL_USE_GUIDANCE
+        return ""
+
     def collect(self, ctx: AssemblyContext) -> list[ContextChunk]:
         if not self._has_tools:
             return []
@@ -208,7 +215,7 @@ class ToolUseEnforcementSource:
             stage="stable",
             slot="enforcement",
             priority=3,
-            content=TOOL_USE_ENFORCEMENT_GUIDANCE,
+            content=TOOL_USE_ENFORCEMENT_GUIDANCE + self._extra_guidance(),
         )]
 
 

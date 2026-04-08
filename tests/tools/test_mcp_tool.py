@@ -31,10 +31,15 @@ def _make_mcp_tool(name="read_file", description="Read a file", input_schema=Non
     return tool
 
 
-def _make_call_result(text="file contents here", is_error=False):
+def _make_call_result(text="file contents here", is_error=False, structured_content=None, structuredContent=None):
     """Create a fake MCP CallToolResult."""
     block = SimpleNamespace(text=text)
-    return SimpleNamespace(content=[block], isError=is_error)
+    result = SimpleNamespace(content=[block], isError=is_error)
+    if structured_content is not None:
+        result.structured_content = structured_content
+    if structuredContent is not None:
+        result.structuredContent = structuredContent
+    return result
 
 
 def _make_mock_server(name, session=None, tools=None):
@@ -226,6 +231,49 @@ class TestToolHandler:
                 result = json.loads(handler({}))
             assert "error" in result
             assert "something went wrong" in result["error"]
+        finally:
+            _servers.pop("test_srv", None)
+
+    def test_successful_call_preserves_structured_content(self):
+        from tools.mcp_tool import _make_tool_handler, _servers
+
+        mock_session = MagicMock()
+        mock_session.call_tool = AsyncMock(
+            return_value=_make_call_result(
+                "hello world",
+                structured_content={"answer": 42, "items": ["a", "b"]},
+            )
+        )
+        server = _make_mock_server("test_srv", session=mock_session)
+        _servers["test_srv"] = server
+
+        try:
+            handler = _make_tool_handler("test_srv", "greet", 120)
+            with self._patch_mcp_loop():
+                result = json.loads(handler({"name": "world"}))
+            assert result["result"] == "hello world"
+            assert result["structuredContent"] == {"answer": 42, "items": ["a", "b"]}
+        finally:
+            _servers.pop("test_srv", None)
+
+    def test_successful_call_preserves_camel_case_structured_content(self):
+        from tools.mcp_tool import _make_tool_handler, _servers
+
+        mock_session = MagicMock()
+        mock_session.call_tool = AsyncMock(
+            return_value=_make_call_result(
+                "hello world",
+                structuredContent={"nested": {"ok": True}},
+            )
+        )
+        server = _make_mock_server("test_srv", session=mock_session)
+        _servers["test_srv"] = server
+
+        try:
+            handler = _make_tool_handler("test_srv", "greet", 120)
+            with self._patch_mcp_loop():
+                result = json.loads(handler({"name": "world"}))
+            assert result["structuredContent"] == {"nested": {"ok": True}}
         finally:
             _servers.pop("test_srv", None)
 

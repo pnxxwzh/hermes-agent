@@ -159,6 +159,17 @@ class TestToolUseEnforcementSource:
         assert len(chunks) == 1
         assert chunks[0].source == "tool_use_enforcement"
 
+    def test_tool_use_enforcement_gpt_includes_openai_specific_guidance(self):
+        src = ToolUseEnforcementSource(True, model="openai/gpt-4.1")
+        chunks = src.collect(AssemblyContext(agent=MagicMock()))
+        assert "<mandatory_tool_use>" in chunks[0].content
+        assert "<act_dont_ask>" in chunks[0].content
+
+    def test_tool_use_enforcement_non_gpt_keeps_base_guidance_only(self):
+        src = ToolUseEnforcementSource(True, model="anthropic/claude-sonnet-4")
+        chunks = src.collect(AssemblyContext(agent=MagicMock()))
+        assert "<mandatory_tool_use>" not in chunks[0].content
+
     def test_tool_use_enforcement_no_inject_returns_empty(self):
         """T6.x: should_inject=False -> returns []. """
         src = ToolUseEnforcementSource(False, model="claude")

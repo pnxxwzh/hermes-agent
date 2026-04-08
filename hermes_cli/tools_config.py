@@ -464,6 +464,11 @@ def _get_platform_tools(
         default_ts = PLATFORMS[platform]["default_toolset"]
         toolset_names = [default_ts]
 
+    disable_mcp = any(
+        isinstance(ts, str) and ts.strip().lower() == "no_mcp"
+        for ts in toolset_names
+    )
+
     configurable_keys = {ts_key for ts_key, _, _ in CONFIGURABLE_TOOLSETS}
 
     # If the saved list contains any configurable keys directly, the user
@@ -514,6 +519,7 @@ def _get_platform_tools(
         if ts not in configurable_keys
         and ts not in plugin_ts_keys
         and ts not in platform_default_keys
+        and ts != "no_mcp"
     }
 
     # MCP servers are expected to be available on all platforms by default.
@@ -528,7 +534,9 @@ def _get_platform_tools(
     }
     explicit_mcp_servers = explicit_passthrough & enabled_mcp_servers
     enabled_toolsets.update(explicit_passthrough - enabled_mcp_servers)
-    if include_default_mcp_servers:
+    if disable_mcp:
+        pass
+    elif include_default_mcp_servers:
         if explicit_mcp_servers:
             enabled_toolsets.update(explicit_mcp_servers)
         else:

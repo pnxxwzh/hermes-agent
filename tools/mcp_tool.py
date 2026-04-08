@@ -1178,7 +1178,19 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
             for block in (result.content or []):
                 if hasattr(block, "text"):
                     parts.append(block.text)
-            return json.dumps({"result": "\n".join(parts) if parts else ""})
+            text_result = "\n".join(parts) if parts else ""
+
+            structured = getattr(result, "structured_content", None)
+            if structured is None:
+                structured = getattr(result, "structuredContent", None)
+            if structured is not None:
+                return json.dumps(
+                    {
+                        "result": text_result,
+                        "structuredContent": structured,
+                    }
+                )
+            return json.dumps({"result": text_result})
 
         try:
             return _run_on_mcp_loop(_call(), timeout=tool_timeout)

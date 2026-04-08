@@ -68,6 +68,39 @@ def test_get_platform_tools_keeps_enabled_mcp_servers_with_explicit_builtin_sele
     assert "web-search-prime" in enabled
 
 
+def test_get_platform_tools_no_mcp_sentinel_disables_default_mcp_servers():
+    config = {
+        "platform_toolsets": {"cli": ["web", "memory", "no_mcp"]},
+        "mcp_servers": {
+            "exa": {"url": "https://mcp.exa.ai/mcp"},
+            "web-search-prime": {"url": "https://api.z.ai/api/mcp/web_search_prime/mcp"},
+        },
+    }
+
+    enabled = _get_platform_tools(config, "cli")
+
+    assert "web" in enabled
+    assert "memory" in enabled
+    assert "exa" not in enabled
+    assert "web-search-prime" not in enabled
+    assert "no_mcp" not in enabled
+
+
+def test_get_platform_tools_no_mcp_sentinel_blocks_explicit_mcp_allowlist():
+    config = {
+        "platform_toolsets": {"cli": ["web", "exa", "no_mcp"]},
+        "mcp_servers": {
+            "exa": {"url": "https://mcp.exa.ai/mcp"},
+        },
+    }
+
+    enabled = _get_platform_tools(config, "cli")
+
+    assert "web" in enabled
+    assert "exa" not in enabled
+    assert "no_mcp" not in enabled
+
+
 def test_toolset_has_keys_for_vision_accepts_codex_auth(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     (tmp_path / "auth.json").write_text(

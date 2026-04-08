@@ -417,3 +417,49 @@ class TestGenerateSummary:
         summary = await tc._generate_summary_async("Turn content", metrics)
 
         assert summary == "[CONTEXT SUMMARY]:"
+
+    def test_generate_summary_uses_jittered_backoff_on_retry(self):
+        tc = _make_compressor()
+        tc.client = MagicMock()
+        tc.client.chat.completions.create.side_effect = [
+            RuntimeError("temporary"),
+            SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(content="Recovered summary"))]
+            ),
+        ]
+        metrics = TrajectoryMetrics()
+
+        with (
+            patch("trajectory_compressor.jittered_backoff", return_value=0.0) as mock_backoff,
+            patch("trajectory_compressor.time.sleep") as mock_sleep,
+        ):
+            summary = tc._generate_summary("Turn content", metrics)
+
+        assert summary == "[CONTEXT SUMMARY]: Recovered summary"
+        mock_backoff.assert_called_once_with(1, base_delay=float(tc.config.retry_delay), max_delay=30.0)
+        mock_sleep.assert_called_once_with(0.0)
+
+    @pytest.mark.asyncio
+    async def test_generate_summary_async_uses_jittered_backoff_on_retry(self):
+        tc = _make_compressor()
+        mock_client = MagicMock()
+        mock_client.chat.completions.create = AsyncMock(
+            side_effect=[
+                RuntimeError("temporary"),
+                SimpleNamespace(
+                    choices=[SimpleNamespace(message=SimpleNamespace(content="Recovered summary"))]
+                ),
+            ]
+        )
+        tc._get_async_client = MagicMock(return_value=mock_client)
+        metrics = TrajectoryMetrics()
+
+        with (
+            patch("trajectory_compressor.jittered_backoff", return_value=0.0) as mock_backoff,
+            patch("trajectory_compressor.asyncio.sleep", new=AsyncMock()) as mock_sleep,
+        ):
+            summary = await tc._generate_summary_async("Turn content", metrics)
+
+        assert summary == "[CONTEXT SUMMARY]: Recovered summary"
+        mock_backoff.assert_called_once_with(1, base_delay=float(tc.config.retry_delay), max_delay=30.0)
+        mock_sleep.assert_awaited_once_with(0.0)

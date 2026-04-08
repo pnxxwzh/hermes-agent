@@ -89,6 +89,7 @@ from agent.model_metadata import (
 from agent.context_compressor import ContextCompressor
 from agent.prompt_caching import apply_anthropic_cache_control
 from agent.prompt_builder import build_skills_system_prompt, build_context_files_prompt, load_soul_md, TOOL_USE_ENFORCEMENT_GUIDANCE, TOOL_USE_ENFORCEMENT_MODELS
+from agent.retry_utils import jittered_backoff
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
 from agent.display import (
     KawaiiSpinner, build_tool_preview as _build_tool_preview,
@@ -3448,6 +3449,24 @@ class AIAgent:
             effective_system=effective_system,
             prefill_messages=prefill_messages,
         )
+        if self.api_mode == "anthropic_messages":
+            try:
+                from agent.anthropic_adapter import convert_messages_to_anthropic_metric_view
+
+                prepared_messages = self._prepare_anthropic_messages_for_api(
+                    [{"role": "system", "content": effective_system}] + final_conversation_messages
+                    if effective_system
+                    else list(final_conversation_messages)
+                )
+                _, final_conversation_messages = convert_messages_to_anthropic_metric_view(
+                    prepared_messages
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Anthropic metrics adaptation failed; falling back to semantic request messages: %s",
+                    exc,
+                )
+
         final_heat_by_index = self._align_tool_heat_to_final_messages(
             original_request_messages,
             original_message_heat_by_index,
@@ -7787,7 +7806,11 @@ class AIAgent:
                             })
                         
                         # Longer backoff for rate limiting (likely cause of None choices)
-                        wait_time = min(5 * (2 ** (retry_count - 1)), 120)  # 5s, 10s, 20s, 40s, 80s, 120s
+                        wait_time = jittered_backoff(
+                            retry_count,
+                            base_delay=5.0,
+                            max_delay=120.0,
+                        )
                         self._vprint(f"{self.log_prefix}⏳ Retrying in {wait_time}s (extended backoff for possible rate limit)...", force=True)
                         logging.warning(f"Invalid API response (retry {retry_count}/{max_retries}): {', '.join(error_details)} | Provider: {provider_name}")
                         
@@ -8527,7 +8550,15 @@ class AIAgent:
                                     _retry_after = min(int(_ra_raw), 120)  # Cap at 2 minutes
                                 except (TypeError, ValueError):
                                     pass
-                    wait_time = _retry_after if _retry_after else min(2 ** retry_count, 60)
+                    wait_time = (
+                        _retry_after
+                        if _retry_after
+                        else jittered_backoff(
+                            retry_count,
+                            base_delay=2.0,
+                            max_delay=60.0,
+                        )
+                    )
                     if is_rate_limited:
                         self._emit_status(f"⏱️ Rate limit reached. Waiting {wait_time}s before retry (attempt {retry_count + 1}/{max_retries})...")
                     else:

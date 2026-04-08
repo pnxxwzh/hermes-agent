@@ -185,6 +185,31 @@ TOOL_USE_ENFORCEMENT_GUIDANCE = (
     "without acting are not acceptable."
 )
 
+OPENAI_CODEX_TOOL_USE_GUIDANCE = (
+    "\n\n# GPT/Codex execution discipline\n"
+    "<mandatory_tool_use>\n"
+    "NEVER answer these from memory or mental computation — ALWAYS use a tool:\n"
+    "- Arithmetic, math, calculations -> use terminal or execute_code\n"
+    "- Hashes, encodings, checksums -> use terminal\n"
+    "- Current time, date, timezone -> use terminal\n"
+    "- System state: OS, CPU, memory, disk, ports, processes -> use terminal\n"
+    "- File contents, sizes, line counts -> use read_file, search_files, or terminal\n"
+    "- Git history, branches, diffs -> use terminal\n"
+    "- Current facts (weather, news, versions) -> use web_search\n"
+    "</mandatory_tool_use>\n"
+    "\n"
+    "<act_dont_ask>\n"
+    "When a request has an obvious default interpretation, act on it immediately "
+    "instead of asking for clarification. Only ask when the ambiguity would "
+    "materially change which tool you should use.\n"
+    "</act_dont_ask>\n"
+    "\n"
+    "<verification>\n"
+    "Before finalizing, verify correctness, grounding, formatting, and that no "
+    "obvious follow-up tool call is still needed.\n"
+    "</verification>"
+)
+
 # Model name substrings that trigger tool-use enforcement guidance.
 # Add new patterns here when a model family needs explicit steering.
 TOOL_USE_ENFORCEMENT_MODELS = ("gpt", "codex")

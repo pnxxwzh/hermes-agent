@@ -1,3 +1,5 @@
+import json
+
 from tools.budget_config import BudgetConfig
 from tools.tool_result_storage import (
     PERSISTED_OUTPUT_CLOSING_TAG,
@@ -40,6 +42,29 @@ def test_maybe_persist_tool_result_persists_large_output_to_env():
     assert PERSISTED_OUTPUT_CLOSING_TAG in replacement
     assert "/tmp/hermes-results/call_1.txt" in replacement
     assert env.commands
+
+
+def test_maybe_persist_tool_result_preserves_structured_content_in_persisted_payload():
+    env = _Env()
+    content = json.dumps(
+        {
+            "result": "A" * 5000,
+            "structuredContent": {"items": [1, 2, 3], "meta": {"source": "mcp"}},
+        }
+    )
+    replacement, state = maybe_persist_tool_result(
+        content=content,
+        tool_name="mcp_tool",
+        tool_use_id="call_structured",
+        env=env,
+        config=BudgetConfig(default_result_size=1000, preview_size=120),
+    )
+    assert state == "persisted_preview"
+    assert env.commands
+    persisted_command, _timeout = env.commands[0]
+    assert '"structuredContent"' in persisted_command
+    assert '"items": [1, 2, 3]' in persisted_command
+    assert PERSISTED_OUTPUT_TAG in replacement
 
 
 def test_maybe_persist_tool_result_falls_back_to_inline_truncation():

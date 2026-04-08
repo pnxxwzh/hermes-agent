@@ -10,6 +10,7 @@ Auth supports:
   - Claude Code credentials (~/.claude.json or ~/.claude/.credentials.json) → Bearer auth
 """
 
+import copy
 import json
 import logging
 import os
@@ -962,6 +963,61 @@ def _convert_content_to_anthropic(content: Any) -> Any:
     return converted
 
 
+def _to_plain_data(value: Any, _path: set[int] | None = None) -> Any:
+    """Convert SDK objects / namespaces into plain Python data recursively."""
+    if _path is None:
+        _path = set()
+
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, dict):
+        return {k: _to_plain_data(v, _path) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_to_plain_data(v, _path) for v in value]
+
+    obj_id = id(value)
+    if obj_id in _path:
+        return None
+    _path.add(obj_id)
+
+    if hasattr(value, "model_dump"):
+        try:
+            result = value.model_dump()
+            _path.discard(obj_id)
+            return _to_plain_data(result, _path)
+        except Exception:
+            pass
+
+    if hasattr(value, "__dict__"):
+        result = {
+            k: _to_plain_data(v, _path)
+            for k, v in vars(value).items()
+            if not k.startswith("_")
+        }
+        _path.discard(obj_id)
+        return result
+
+    _path.discard(obj_id)
+    return value
+
+
+def _extract_preserved_thinking_blocks(message: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Return Anthropic thinking blocks previously preserved on the message."""
+    raw_details = message.get("reasoning_details")
+    if not isinstance(raw_details, list):
+        return []
+
+    preserved: List[Dict[str, Any]] = []
+    for detail in raw_details:
+        if not isinstance(detail, dict):
+            continue
+        block_type = str(detail.get("type", "") or "").strip().lower()
+        if block_type not in {"thinking", "redacted_thinking"}:
+            continue
+        preserved.append(copy.deepcopy(detail))
+    return preserved
+
+
 def convert_messages_to_anthropic(
     messages: List[Dict],
 ) -> Tuple[Optional[Any], List[Dict]]:
@@ -995,7 +1051,7 @@ def convert_messages_to_anthropic(
             continue
 
         if role == "assistant":
-            blocks = []
+            blocks = _extract_preserved_thinking_blocks(m)
             if content:
                 if isinstance(content, list):
                     converted_content = _convert_content_to_anthropic(content)
@@ -1124,7 +1180,18 @@ def convert_messages_to_anthropic(
                         curr_content = [{"type": "text", "text": curr_content}]
                     fixed[-1]["content"] = prev_content + curr_content
             else:
-                # Consecutive assistant messages — merge text content
+                # Consecutive assistant messages — merge text content.
+                # Drop thinking blocks from the *second* message: their
+                # signature was computed against a different turn boundary
+                # and becomes invalid once merged.
+                if isinstance(m["content"], list):
+                    m["content"] = [
+                        b for b in m["content"]
+                        if not (
+                            isinstance(b, dict)
+                            and b.get("type") in ("thinking", "redacted_thinking")
+                        )
+                    ]
                 prev_blocks = fixed[-1]["content"]
                 curr_blocks = m["content"]
                 if isinstance(prev_blocks, list) and isinstance(curr_blocks, list):
@@ -1142,7 +1209,93 @@ def convert_messages_to_anthropic(
             fixed.append(m)
     result = fixed
 
+    # Anthropic signs thinking blocks against the full turn content.
+    # Any mutation above (orphan cleanup, role merging, compression) can
+    # invalidate signatures on stale thinking blocks, so only the latest
+    # assistant turn may retain signed thinking.
+    _THINKING_TYPES = frozenset(("thinking", "redacted_thinking"))
+
+    last_assistant_idx = None
+    for i in range(len(result) - 1, -1, -1):
+        if result[i].get("role") == "assistant":
+            last_assistant_idx = i
+            break
+
+    for idx, message in enumerate(result):
+        if message.get("role") != "assistant" or not isinstance(message.get("content"), list):
+            continue
+
+        if idx != last_assistant_idx:
+            stripped = [
+                block for block in message["content"]
+                if not (
+                    isinstance(block, dict)
+                    and block.get("type") in _THINKING_TYPES
+                )
+            ]
+            message["content"] = stripped or [{"type": "text", "text": "(thinking elided)"}]
+        else:
+            new_content = []
+            for block in message["content"]:
+                if not isinstance(block, dict) or block.get("type") not in _THINKING_TYPES:
+                    new_content.append(block)
+                    continue
+                if block.get("type") == "redacted_thinking":
+                    if block.get("data"):
+                        new_content.append(block)
+                elif block.get("signature"):
+                    new_content.append(block)
+                else:
+                    thinking_text = block.get("thinking", "")
+                    if thinking_text:
+                        new_content.append({"type": "text", "text": thinking_text})
+            message["content"] = new_content or [{"type": "text", "text": "(empty)"}]
+
+        for block in message["content"]:
+            if isinstance(block, dict) and block.get("type") in _THINKING_TYPES:
+                block.pop("cache_control", None)
+
     return system, result
+
+
+def convert_messages_to_anthropic_metric_view(
+    messages: List[Dict[str, Any]],
+) -> Tuple[Optional[Any], List[Dict[str, Any]]]:
+    """Return a metrics-oriented view of Anthropic-visible messages.
+
+    This follows Anthropic transport shaping for assistant content while
+    preserving Hermes's semantic tool buckets by materializing tool_result
+    blocks back into pseudo ``role="tool"`` messages for accounting.
+    """
+    system, anthropic_messages = convert_messages_to_anthropic(messages)
+    metric_messages: List[Dict[str, Any]] = []
+
+    for message in anthropic_messages:
+        role = str(message.get("role", "") or "").strip().lower()
+        content = message.get("content")
+
+        if role == "assistant":
+            metric_messages.append({"role": "assistant", "content": copy.deepcopy(content)})
+            continue
+
+        if role == "user" and isinstance(content, list):
+            if content and all(
+                isinstance(block, dict) and block.get("type") == "tool_result"
+                for block in content
+            ):
+                for block in content:
+                    metric_messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": block.get("tool_use_id", ""),
+                            "content": block.get("content", ""),
+                        }
+                    )
+                continue
+
+        metric_messages.append({"role": role or "user", "content": copy.deepcopy(content)})
+
+    return system, metric_messages
 
 
 def build_anthropic_kwargs(
@@ -1279,6 +1432,7 @@ def normalize_anthropic_response(
     """
     text_parts = []
     reasoning_parts = []
+    reasoning_details = []
     tool_calls = []
 
     for block in response.content:
@@ -1286,6 +1440,9 @@ def normalize_anthropic_response(
             text_parts.append(block.text)
         elif block.type == "thinking":
             reasoning_parts.append(block.thinking)
+            block_dict = _to_plain_data(block)
+            if isinstance(block_dict, dict):
+                reasoning_details.append(block_dict)
         elif block.type == "tool_use":
             name = block.name
             if strip_tool_prefix and name.startswith(_MCP_TOOL_PREFIX):
@@ -1316,7 +1473,7 @@ def normalize_anthropic_response(
             tool_calls=tool_calls or None,
             reasoning="\n\n".join(reasoning_parts) if reasoning_parts else None,
             reasoning_content=None,
-            reasoning_details=None,
+            reasoning_details=reasoning_details or None,
         ),
         finish_reason,
     )

@@ -3378,6 +3378,49 @@ class HermesCLI:
 
         flush_tool_summary()
         print()
+
+    def _notify_session_boundary(self, hook_name: str, *, session_id: str | None = None) -> None:
+        """Invoke a plugin session-boundary hook without letting it affect CLI flow."""
+        effective_session_id = session_id
+        if not effective_session_id and self.agent is not None:
+            effective_session_id = getattr(self.agent, "session_id", None)
+        if not effective_session_id:
+            effective_session_id = self.session_id
+        if not effective_session_id:
+            return
+
+        try:
+            from hermes_cli.plugins import invoke_hook as _invoke_hook
+
+            _invoke_hook(
+                hook_name,
+                session_id=effective_session_id,
+                platform="cli",
+            )
+        except Exception as exc:
+            logger.warning("%s hook failed: %s", hook_name, exc)
+
+    def _run_session_exit_hooks(self) -> None:
+        """Run plugin hooks associated with orderly CLI exit."""
+        # run_conversation() already fires on_session_end on normal completion.
+        # Only emit it here when the exit interrupted an active turn.
+        if self.agent and getattr(self, "_agent_running", False):
+            try:
+                from hermes_cli.plugins import invoke_hook as _invoke_hook
+
+                _invoke_hook(
+                    "on_session_end",
+                    session_id=self.agent.session_id,
+                    completed=False,
+                    interrupted=True,
+                    model=getattr(self.agent, "model", None),
+                    platform=getattr(self.agent, "platform", None) or "cli",
+                )
+            except Exception as exc:
+                logger.warning("on_session_end hook failed during CLI exit: %s", exc)
+
+        if self.agent or self.session_id:
+            self._notify_session_boundary("on_session_finalize")
     
     def new_session(self, silent=False):
         """Start a fresh session with a new session ID and cleared agent state."""
@@ -3388,6 +3431,8 @@ class HermesCLI:
                 pass
 
         old_session_id = self.session_id
+        if old_session_id:
+            self._notify_session_boundary("on_session_finalize", session_id=old_session_id)
         if self._session_db and old_session_id:
             try:
                 self._session_db.end_session(old_session_id, "new_session")
@@ -3430,6 +3475,8 @@ class HermesCLI:
                     )
                 except Exception:
                     pass
+
+        self._notify_session_boundary("on_session_reset", session_id=self.session_id)
 
         if not silent:
             print("(^_^)v New session started!")
@@ -8083,23 +8130,7 @@ class HermesCLI:
                     self._session_db.end_session(self.agent.session_id, "cli_close")
                 except (Exception, KeyboardInterrupt) as e:
                     logger.debug("Could not close session in DB: %s", e)
-            # Plugin hook: on_session_end — safety net for interrupted exits.
-            # run_conversation() already fires this per-turn on normal completion,
-            # so only fire here if the agent was mid-turn (_agent_running) when
-            # the exit occurred, meaning run_conversation's hook didn't fire.
-            if self.agent and getattr(self, '_agent_running', False):
-                try:
-                    from hermes_cli.plugins import invoke_hook as _invoke_hook
-                    _invoke_hook(
-                        "on_session_end",
-                        session_id=self.agent.session_id,
-                        completed=False,
-                        interrupted=True,
-                        model=getattr(self.agent, 'model', None),
-                        platform=getattr(self.agent, 'platform', None) or "cli",
-                    )
-                except Exception:
-                    pass
+            self._run_session_exit_hooks()
             _run_cleanup()
             self._print_exit_summary()
 

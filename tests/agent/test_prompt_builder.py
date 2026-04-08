@@ -20,6 +20,7 @@ from agent.prompt_builder import (
     build_context_files_prompt,
     CONTEXT_FILE_MAX_CHARS,
     DEFAULT_AGENT_IDENTITY,
+    OPENAI_CODEX_TOOL_USE_GUIDANCE,
     TOOL_USE_ENFORCEMENT_GUIDANCE,
     TOOL_USE_ENFORCEMENT_MODELS,
     MEMORY_GUIDANCE,
@@ -948,6 +949,12 @@ class TestToolUseEnforcementGuidance:
 
     def test_guidance_requires_action(self):
         assert "MUST" in TOOL_USE_ENFORCEMENT_GUIDANCE
+
+    def test_openai_codex_guidance_contains_mandatory_tool_use(self):
+        assert "<mandatory_tool_use>" in OPENAI_CODEX_TOOL_USE_GUIDANCE
+
+    def test_openai_codex_guidance_contains_act_dont_ask(self):
+        assert "<act_dont_ask>" in OPENAI_CODEX_TOOL_USE_GUIDANCE
 
     def test_enforcement_models_includes_gpt(self):
         assert "gpt" in TOOL_USE_ENFORCEMENT_MODELS

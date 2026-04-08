@@ -20,7 +20,7 @@ def _mock_response(content="Hello", finish_reason="stop", tool_calls=None):
 class TestRunAgentRequestMetrics:
     """Request metrics should reflect the final request buckets."""
 
-    def _make_agent(self, *, prefill_messages=None):
+    def _make_agent(self, *, prefill_messages=None, api_mode=None):
         from run_agent import AIAgent
 
         with patch("run_agent.OpenAI"), \
@@ -32,6 +32,7 @@ class TestRunAgentRequestMetrics:
                 skip_context_files=True,
                 skip_memory=True,
                 prefill_messages=prefill_messages,
+                api_mode=api_mode,
             )
 
     def _make_request_assembly(self, *, messages=None, prefill_messages=None, tools=None):
@@ -323,3 +324,53 @@ class TestRunAgentRequestMetrics:
         assert result["failed"] is True
         assert result["request_metrics"] is agent._last_request_metrics
         assert result["context_metrics"] is agent._last_context_metrics
+
+    def test_anthropic_request_metrics_use_transport_visible_metric_view(self):
+        from agent.anthropic_adapter import convert_messages_to_anthropic_metric_view
+
+        agent = self._make_agent(api_mode="anthropic_messages")
+        request_messages = [
+            {
+                "role": "assistant",
+                "content": "Earlier",
+                "reasoning_details": [
+                    {"type": "thinking", "thinking": "old chain", "signature": "sig-old"},
+                ],
+            },
+            {"role": "user", "content": "Continue"},
+            {
+                "role": "assistant",
+                "content": "Latest",
+                "reasoning_details": [
+                    {"type": "thinking", "thinking": "new chain", "signature": "sig-new"},
+                ],
+            },
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": "call_1", "function": {"name": "test", "arguments": "{}"}}],
+            },
+            {"role": "tool", "tool_call_id": "call_1", "content": "payload"},
+        ]
+        assembly = self._make_request_assembly(messages=request_messages)
+
+        metrics = agent._build_final_request_metrics(
+            input_assembly=assembly,
+            final_api_messages=list(request_messages),
+            effective_system="",
+            prefill_messages=[],
+            original_request_messages=list(request_messages),
+            original_message_heat_by_index={4: "hot"},
+            original_message_persistence_by_index={4: "inline"},
+        )
+
+        _, metric_messages = convert_messages_to_anthropic_metric_view(request_messages)
+        expected_assistant_chars = sum(
+            len(str(message)) for message in metric_messages if message.get("role") == "assistant"
+        )
+        expected_tool_chars = sum(
+            len(str(message)) for message in metric_messages if message.get("role") == "tool"
+        )
+
+        assert metrics.get_bucket("messages_assistant").char_count == expected_assistant_chars
+        assert metrics.get_bucket("messages_tool_hot").char_count == expected_tool_chars
