@@ -6660,7 +6660,12 @@ class AIAgent:
         # return a dict with a ``context`` key whose value is a string
         # that will be appended to the ephemeral system prompt for every
         # API call in this turn (not persisted to session DB or cache).
+        self._plugin_turn_context = ""
+        self._plugin_turn_context_ready = False
+        self._sparkgraph_turn_context = ""
+        self._sparkgraph_turn_context_ready = False
         _plugin_turn_context = ""
+        _sparkgraph_turn_context = ""
         try:
             from hermes_cli.plugins import invoke_hook as _invoke_hook
             _pre_results = _invoke_hook(
@@ -6680,8 +6685,11 @@ class AIAgent:
                     _ctx_parts.append(r)
             if _ctx_parts:
                 _plugin_turn_context = "\n\n".join(_ctx_parts)
+            self._plugin_turn_context = _plugin_turn_context
+            self._plugin_turn_context_ready = True
         except Exception as exc:
             logger.warning("pre_llm_call hook failed: %s", exc)
+            self._plugin_turn_context_ready = True
 
         # Main conversation loop
         api_call_count = 0
@@ -6807,17 +6815,19 @@ class AIAgent:
                 _sparkgraph_turn_context = "\n".join(
                     c.content for c in dynamic_result.dynamic_chunks if c.source == "sparkgraph_recall"
                 )
-                # Persist to instance so the next turn's fallback path can find them
+                # Persist turn-local dynamic context for later iterations in this turn.
                 self._plugin_turn_context = _plugin_turn_context
                 self._sparkgraph_turn_context = _sparkgraph_turn_context
+                self._plugin_turn_context_ready = True
+                self._sparkgraph_turn_context_ready = True
             else:
                 # Fallback to original per-source logic
                 if self.ephemeral_system_prompt:
                     effective_system = (effective_system + "\n\n" + self.ephemeral_system_prompt).strip()
-                _plugin_turn_context = getattr(self, "_plugin_turn_context", "") or ""
-                _sparkgraph_turn_context = getattr(self, "_sparkgraph_turn_context", "") or ""
                 if _plugin_turn_context:
                     effective_system = (effective_system + "\n\n" + _plugin_turn_context).strip()
+                if not _sparkgraph_turn_context and getattr(self, "_sparkgraph_turn_context_ready", False):
+                    _sparkgraph_turn_context = getattr(self, "_sparkgraph_turn_context", "") or ""
                 if _sparkgraph_turn_context:
                     effective_system = (effective_system + "\n\n" + _sparkgraph_turn_context).strip()
 

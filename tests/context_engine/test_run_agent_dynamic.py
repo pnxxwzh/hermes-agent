@@ -1,6 +1,7 @@
 """Tests for run_agent.py dynamic layer integration (Step 12)."""
 
 import pytest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 
@@ -280,3 +281,95 @@ class TestDynamicLayerIntegration:
             )
             call_kwargs = mock_assembler.assemble_dynamic.call_args.kwargs
             assert call_kwargs["user_message"] == "original message"
+
+    def test_fallback_uses_current_turn_plugin_context_not_stale_instance_cache(self):
+        """Fallback path should use current-turn plugin output, not previous-turn cache."""
+        from run_agent import AIAgent
+        with patch("run_agent.OpenAI"), \
+             patch("run_agent.get_tool_definitions", return_value=[]), \
+             patch("run_agent.check_toolset_requirements", return_value={}):
+            agent = AIAgent(
+                api_key="test-key",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+
+        agent.client = MagicMock()
+        agent._cached_system_prompt = "STABLE"
+        agent._use_prompt_caching = False
+        agent.tool_delay = 0
+        agent.compression_enabled = False
+        agent.save_trajectories = False
+        agent._plugin_turn_context = "OLD_PLUGIN"
+        agent._sparkgraph_turn_context = "OLD_RECALL"
+
+        response = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="ok", tool_calls=None), finish_reason="stop")],
+            usage=None,
+            model="test/model",
+        )
+        agent.client.chat.completions.create.return_value = response
+
+        mock_assembler = MagicMock()
+        mock_assembler.assemble_dynamic.side_effect = RuntimeError("boom")
+        agent._context_assembler = mock_assembler
+
+        with (
+            patch("hermes_cli.plugins.invoke_hook", return_value=[{"context": "CURRENT_PLUGIN"}]),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("hello")
+
+        assert result["completed"] is True
+        call_args = agent.client.chat.completions.create.call_args
+        api_messages = call_args.kwargs.get("messages") or call_args[1].get("messages")
+        assert api_messages[0]["content"] == "STABLE\n\nCURRENT_PLUGIN"
+
+    def test_fallback_does_not_reuse_previous_turn_sparkgraph_context(self):
+        """Fallback path should not leak SparkGraph recall from the previous turn."""
+        from run_agent import AIAgent
+        with patch("run_agent.OpenAI"), \
+             patch("run_agent.get_tool_definitions", return_value=[]), \
+             patch("run_agent.check_toolset_requirements", return_value={}):
+            agent = AIAgent(
+                api_key="test-key",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+
+        agent.client = MagicMock()
+        agent._cached_system_prompt = "STABLE"
+        agent._use_prompt_caching = False
+        agent.tool_delay = 0
+        agent.compression_enabled = False
+        agent.save_trajectories = False
+        agent._sparkgraph_turn_context = "OLD_RECALL"
+        agent._sparkgraph_turn_context_ready = True
+
+        response = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="ok", tool_calls=None), finish_reason="stop")],
+            usage=None,
+            model="test/model",
+        )
+        agent.client.chat.completions.create.return_value = response
+
+        mock_assembler = MagicMock()
+        mock_assembler.assemble_dynamic.side_effect = RuntimeError("boom")
+        agent._context_assembler = mock_assembler
+
+        with (
+            patch("hermes_cli.plugins.invoke_hook", return_value=[]),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("hello")
+
+        assert result["completed"] is True
+        call_args = agent.client.chat.completions.create.call_args
+        api_messages = call_args.kwargs.get("messages") or call_args[1].get("messages")
+        assert api_messages[0]["content"] == "STABLE"

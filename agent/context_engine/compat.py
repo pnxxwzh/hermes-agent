@@ -224,6 +224,9 @@ def wrap_invoke_pre_llm_call(
     user_message: str,
     conversation_history: list,
     is_first_turn: bool,
+    *,
+    model: str = "",
+    platform: str = "",
 ) -> tuple[str, Optional[str]]:
     """Wrapper for hermes_cli.plugins.invoke_hook('pre_llm_call', ...).
 
@@ -238,6 +241,8 @@ def wrap_invoke_pre_llm_call(
             user_message=user_message,
             conversation_history=list(conversation_history),
             is_first_turn=is_first_turn,
+            model=model,
+            platform=platform,
         )
         parts: list[str] = []
         if results:

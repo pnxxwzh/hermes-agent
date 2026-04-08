@@ -143,6 +143,33 @@ class TestPluginTurnContextSource:
             src.collect(ctx)
             assert mock_call.call_args.kwargs["user_message"] == "hello world"
 
+    def test_plugin_model_and_platform_passed(self):
+        """T8.x: model and platform from ctx.agent are forwarded."""
+        agent = MagicMock()
+        agent.model = "gpt-test"
+        agent.platform = "discord"
+        with patch(
+            "agent.context_engine.compat.wrap_invoke_pre_llm_call",
+            return_value=("", None),
+        ) as mock_call:
+            ctx = AssemblyContext(agent=agent, user_message="hello world")
+            src = PluginTurnContextSource(session_id="s1")
+            src.collect(ctx)
+            assert mock_call.call_args.kwargs["model"] == "gpt-test"
+            assert mock_call.call_args.kwargs["platform"] == "discord"
+
+    def test_plugin_uses_cached_turn_context(self):
+        """T8.x: cached per-turn plugin context skips duplicate hook calls."""
+        agent = MagicMock()
+        agent._plugin_turn_context_ready = True
+        agent._plugin_turn_context = "cached plugin context"
+        with patch("agent.context_engine.compat.wrap_invoke_pre_llm_call") as mock_call:
+            src = PluginTurnContextSource(session_id="s1")
+            chunks = src.collect(AssemblyContext(agent=agent, user_message="hello"))
+            mock_call.assert_not_called()
+            assert len(chunks) == 1
+            assert chunks[0].content == "cached plugin context"
+
 
 class TestSparkGraphRecallSource:
     """T8: SparkGraphRecallSource."""
@@ -216,6 +243,26 @@ class TestSparkGraphRecallSource:
         )
         src.collect(AssemblyContext(agent=MagicMock(), user_message="query"))
         mock_manager.build_recall_block.assert_called_once_with("query", max_nodes=None, max_chars=None)
+
+    def test_sparkgraph_recall_cached_per_turn(self):
+        """T8.x: second collect in the same turn reuses cached recall."""
+        agent = MagicMock()
+        agent._sparkgraph_turn_context_ready = False
+        agent._sparkgraph_turn_context = ""
+        mock_manager = MagicMock()
+        mock_manager.build_recall_block.return_value = ("[SparkGraph Recall]", 0)
+        src = SparkGraphRecallSource(
+            sparkgraph_manager=mock_manager,
+            sparkgraph_enabled=True,
+        )
+        ctx = AssemblyContext(agent=agent, user_message="query")
+
+        first_chunks = src.collect(ctx)
+        second_chunks = src.collect(ctx)
+
+        mock_manager.build_recall_block.assert_called_once_with("query", max_nodes=None, max_chars=None)
+        assert first_chunks[0].content == "[SparkGraph Recall]"
+        assert second_chunks[0].content == "[SparkGraph Recall]"
 
 
 class TestHonchoTurnSource:

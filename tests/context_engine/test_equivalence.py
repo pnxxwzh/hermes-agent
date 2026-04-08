@@ -72,7 +72,7 @@ def _original_sparkgraph_context(agent, original_user_message):
         and original_user_message
     ):
         try:
-            _sparkgraph_turn_context = getattr(
+            _sparkgraph_turn_context, _ = getattr(
                 agent, "_sparkgraph_manager", None
             ).build_recall_block(original_user_message)
         except Exception:
@@ -264,7 +264,7 @@ class TestEquivalence:
         # Assembler would call build_recall_block("") (empty string)
         # but it returns "" anyway so no chunk is added
         mock_manager.reset_mock()
-        result = mock_manager.build_recall_block("")
+        result, _ = mock_manager.build_recall_block("")
         assert result == ""  # empty query -> empty result
 
     def test_honcho_turn_context_in_user_message_not_system_prompt(self):

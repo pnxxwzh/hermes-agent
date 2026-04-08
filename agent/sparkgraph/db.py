@@ -68,6 +68,22 @@ def _rebuild_fts_table(conn: sqlite3.Connection) -> None:
     )
 
 
+def _recreate_table_drop_column(conn: sqlite3.Connection, table: str, drop_col: str) -> None:
+    """Fallback: recreate table without drop_col (SQLite < 3.35.0)."""
+    col_info = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    cols = [r["name"] for r in col_info if r["name"] != drop_col]
+    col_list = ", ".join(cols)
+    conn.execute(f"CREATE TABLE {table}_new AS SELECT {col_list} FROM {table}")
+    conn.execute(f"DROP TABLE {table}")
+    conn.execute(f"ALTER TABLE {table}_new RENAME TO {table}")
+    conn.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS ux_sg_nodes_canonical_type ON {NODES_TABLE}(canonical_key, type)")
+    conn.execute(f"CREATE INDEX IF NOT EXISTS ix_sg_nodes_status_type ON {NODES_TABLE}(status, type)")
+    conn.execute(f"CREATE INDEX IF NOT EXISTS ix_sg_nodes_updated_at ON {NODES_TABLE}(updated_at)")
+    # Rebuild FTS index so search_nodes() still works after table recreation
+    if table == NODES_TABLE:
+        _rebuild_fts_table(conn)
+
+
 def initialize_schema(conn: sqlite3.Connection) -> None:
     """Create the minimal SparkGraph schema if needed."""
     node_types_sql = ", ".join(f"'{value}'" for value in NODE_TYPES)
@@ -206,21 +222,6 @@ def initialize_schema(conn: sqlite3.Connection) -> None:
             except Exception:
                 # SQLite >= 3.35.0 required for DROP COLUMN; fallback: recreate table
                 _recreate_table_drop_column(conn, NODES_TABLE, col)
-
-    def _recreate_table_drop_column(conn: sqlite3.Connection, table: str, drop_col: str) -> None:
-        """Fallback: recreate table without drop_col (SQLite < 3.35.0)."""
-        col_info = conn.execute(f"PRAGMA table_info({table})").fetchall()
-        cols = [r["name"] for r in col_info if r["name"] != drop_col]
-        col_list = ", ".join(cols)
-        conn.execute(f"CREATE TABLE {table}_new AS SELECT {col_list} FROM {table}")
-        conn.execute(f"DROP TABLE {table}")
-        conn.execute(f"ALTER TABLE {table}_new RENAME TO {table}")
-        conn.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS ux_sg_nodes_canonical_type ON {NODES_TABLE}(canonical_key, type)")
-        conn.execute(f"CREATE INDEX IF NOT EXISTS ix_sg_nodes_status_type ON {NODES_TABLE}(status, type)")
-        conn.execute(f"CREATE INDEX IF NOT EXISTS ix_sg_nodes_updated_at ON {NODES_TABLE}(updated_at)")
-        # Rebuild FTS index so search_nodes() still works after table recreation
-        if table == NODES_TABLE:
-            _rebuild_fts_table(conn)
 
     # ── Migration v3: add SOLVES to sg_edges CHECK constraint ──────────────────
     # SQLite CHECK constraints cannot be altered in-place.

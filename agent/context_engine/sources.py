@@ -542,13 +542,30 @@ class PluginTurnContextSource:
 
     def collect(self, ctx: AssemblyContext) -> list[ContextChunk]:
         from agent.context_engine.compat import wrap_invoke_pre_llm_call
+        agent = getattr(ctx, "agent", None)
+        if getattr(agent, "_plugin_turn_context_ready", False) is True:
+            content = getattr(agent, "_plugin_turn_context", "") or ""
+            if not content:
+                return []
+            return [ContextChunk(
+                source="plugin",
+                stage="dynamic",
+                slot="plugin_context",
+                priority=2,
+                content=content,
+            )]
         is_first = len(ctx.conversation_history) <= 1
         content, err = wrap_invoke_pre_llm_call(
             session_id=self._session_id or "",
             user_message=ctx.user_message or "",
             conversation_history=ctx.conversation_history,
             is_first_turn=is_first,
+            model=getattr(agent, "model", "") or "",
+            platform=getattr(agent, "platform", "") or "",
         )
+        if agent is not None:
+            setattr(agent, "_plugin_turn_context", content or "")
+            setattr(agent, "_plugin_turn_context_ready", True)
         if not content and not err:
             return []
         return [ContextChunk(
@@ -580,14 +597,23 @@ class SparkGraphRecallSource:
 
     def collect(self, ctx: AssemblyContext) -> list[ContextChunk]:
         from agent.context_engine.compat import wrap_sparkgraph_build_recall
+        agent = getattr(ctx, "agent", None)
         if not self._enabled or self._manager is None:
             return []
-        content, err = wrap_sparkgraph_build_recall(
-            self._manager,
-            self._enabled,
-            user_message=ctx.user_message or "",
-        )
-        if not content and not err:
+        if getattr(agent, "_sparkgraph_turn_context_ready", False) is True:
+            content = getattr(agent, "_sparkgraph_turn_context", "") or ""
+        else:
+            content, err = wrap_sparkgraph_build_recall(
+                self._manager,
+                self._enabled,
+                user_message=ctx.user_message or "",
+            )
+            if agent is not None:
+                setattr(agent, "_sparkgraph_turn_context", content or "")
+                setattr(agent, "_sparkgraph_turn_context_ready", True)
+            if not content and not err:
+                return []
+        if not content:
             return []
         return [ContextChunk(
             source="sparkgraph_recall",

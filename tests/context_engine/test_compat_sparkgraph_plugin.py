@@ -153,13 +153,22 @@ class TestWrapInvokePreLlmCall:
             "hermes_cli.plugins.invoke_hook",
             return_value=[],
         ) as mock_hook:
-            wrap_invoke_pre_llm_call("sess2", "query", history, True)
+            wrap_invoke_pre_llm_call(
+                "sess2",
+                "query",
+                history,
+                True,
+                model="gpt-test",
+                platform="discord",
+            )
             mock_hook.assert_called_once_with(
                 "pre_llm_call",
                 session_id="sess2",
                 user_message="query",
                 conversation_history=history,
                 is_first_turn=True,
+                model="gpt-test",
+                platform="discord",
             )
 
     def test_wrap_invoke_pre_llm_call_conversation_history_copy(self):
