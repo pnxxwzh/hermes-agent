@@ -58,3 +58,11 @@ mini-swe-agent/
 # Nix
 .direnv/
 result
+
+# Local generated artifacts
+.DS_Store
+build/
+dist/
+
+# Nested research repository tracked separately
+wzh-research/graph-memory/
