@@ -435,7 +435,7 @@ def test_maintenance_deprecates_stale_low_signal_nodes(sg_manager, store):
     ))["recorded_ids"][0]
 
     # Set last_recalled_at to 31 days ago with validated_count>0
-    # (validated_count=0 → reference_ts=now → never deprecated)
+    # validated_count=0 的节点现在以 updated_at 作为 idle 基准，长期陈旧时也会过期。
     old_ts = int(time.time()) - 31 * 86400
     store.conn.execute("UPDATE sg_nodes SET last_recalled_at=?, validated_count=1 WHERE id=?",
                       (old_ts, node_id))

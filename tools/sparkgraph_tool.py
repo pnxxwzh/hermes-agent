@@ -746,26 +746,3 @@ registry.register(
     check_fn=check_sparkgraph_requirements,
     emoji="🕸️",
 )
-
-registry.register(
-    name="sparkgraph_search",
-    toolset="sparkgraph",
-    schema=SPARKGRAPH_SEARCH_SCHEMA,
-    handler=lambda args, **kw: sparkgraph_search_tool(
-        query=args.get("query", ""),
-        status=args.get("status"),
-        limit=int(args.get("limit", 5) or 5),
-        store=kw.get("store"),
-    ),
-    check_fn=check_sparkgraph_requirements,
-    emoji="🕸️",
-)
-
-registry.register(
-    name="sparkgraph_stats",
-    toolset="sparkgraph",
-    schema=SPARKGRAPH_STATS_SCHEMA,
-    handler=lambda args, **kw: sparkgraph_stats_tool(store=kw.get("store")),
-    check_fn=check_sparkgraph_requirements,
-    emoji="🕸️",
-)

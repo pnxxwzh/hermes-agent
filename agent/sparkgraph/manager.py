@@ -42,6 +42,7 @@ class SparkGraphManager:
         *,
         max_nodes: int | None = None,
         max_chars: int | None = None,
+        session_id: str | None = None,
     ) -> tuple[str, int]:
         if not self.config.recall.enabled:
             return "", 0
@@ -55,6 +56,7 @@ class SparkGraphManager:
                 related_limit=recall_cfg.max_related,
             ),
             embedding_config=self.config.embedding,
+            session_id=session_id,
         )
         block, included_ids = build_recall_payload(
             nodes,

@@ -8,13 +8,8 @@ from agent.sparkgraph.store import SparkGraphNodeInput, SparkGraphStore
 from agent.sparkgraph.types import NodeStatus, NodeType
 
 
-def test_run_flush_maintenance_never_counted_old_node_not_deprecated(tmp_path):
-    """从未被计数过的节点（last_recalled_at=0, validated_count=0）即使很旧也不淘汰。
-
-    修复 B1 的一部分：increment_validated_count 总是先设置 last_recalled_at=now，
-    所以 last_recalled_at=0 且 validated_count=0 的节点从未被计数过。
-    这类节点还在等待首次召回，不应因 updated_at 过期而被淘汰。
-    """
+def test_run_flush_maintenance_never_counted_old_node_deprecated(tmp_path):
+    """长期未召回且长期未更新的节点会自然过期，即使 validated_count=0。"""
     store = SparkGraphStore(tmp_path / "sparkgraph" / "default.db")
     node_id = store.insert_node(
         SparkGraphNodeInput(
@@ -37,9 +32,8 @@ def test_run_flush_maintenance_never_counted_old_node_not_deprecated(tmp_path):
     result = run_flush_maintenance(store, now_ts=int(time.time()))
     node = store.get_node(node_id)
 
-    # validated_count=0：从未被计数，不淘汰（还在等待首次召回）
-    assert result["deprecated"] == 0
-    assert node["status"] == NodeStatus.ACTIVE.value
+    assert result["deprecated"] == 1
+    assert node["status"] == NodeStatus.DEPRECATED.value
 
 
 def test_run_flush_maintenance_keeps_high_validated_node(tmp_path):
@@ -228,4 +222,3 @@ def test_run_flush_maintenance_recent_recall_not_deprecated(tmp_path):
         f"updated_at=35d ago; got deprecated={result['deprecated']}"
     )
     assert node["status"] == NodeStatus.ACTIVE.value
-

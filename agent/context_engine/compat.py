@@ -194,6 +194,7 @@ def wrap_sparkgraph_build_recall(
     sparkgraph_enabled: bool,
     user_message: str,
     *,
+    session_id: str | None = None,
     max_nodes: int | None = None,
     max_chars: int | None = None,
 ) -> tuple[str, Optional[str]]:
@@ -206,6 +207,7 @@ def wrap_sparkgraph_build_recall(
     try:
         block, _token_estimate = sparkgraph_manager.build_recall_block(
             user_message,
+            session_id=session_id,
             max_nodes=max_nodes,
             max_chars=max_chars,
         )

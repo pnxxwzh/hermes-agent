@@ -163,3 +163,22 @@ class TestBuildSystemPromptIntegration:
             agent._cached_system_prompt = None
             result = agent._build_system_prompt()
             assert isinstance(result, str)
+
+    def test_skip_context_files_removes_project_context(self):
+        """T11.x: skip_context_files=True must not inject AGENTS/project context."""
+        from run_agent import AIAgent
+        with patch("run_agent.OpenAI"), \
+             patch("run_agent.get_tool_definitions", return_value=[]), \
+             patch("run_agent.check_toolset_requirements", return_value={}):
+            agent = AIAgent(
+                api_key="test-key",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+
+        compressor = MagicMock()
+        agent.context_compressor = compressor
+        result = agent._build_system_prompt()
+        assert "# Project Context" not in result
+        assert "AGENTS.md" not in result

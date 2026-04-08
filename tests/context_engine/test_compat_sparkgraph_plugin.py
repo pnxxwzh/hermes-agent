@@ -64,10 +64,10 @@ class TestWrapSparkgraphBuildRecall:
         mock_manager.build_recall_block.return_value = ("", 0)
         wrap_sparkgraph_build_recall(
             mock_manager, True, "my query",
-            max_nodes=5, max_chars=1000,
+            session_id="sess-1", max_nodes=5, max_chars=1000,
         )
         mock_manager.build_recall_block.assert_called_once_with(
-            "my query", max_nodes=5, max_chars=1000,
+            "my query", session_id="sess-1", max_nodes=5, max_chars=1000,
         )
 
 

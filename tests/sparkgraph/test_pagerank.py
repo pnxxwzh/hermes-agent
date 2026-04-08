@@ -63,6 +63,23 @@ class TestGraphCache:
         invalidate_graph_cache()
         assert pg_mod._graph_cache is None
 
+    def test_cache_isolated_by_database_path(self, tmp_path):
+        """Fresh cache from one db must not be reused for another db."""
+        store_one = SparkGraphStore(tmp_path / "one.db")
+        store_two = SparkGraphStore(tmp_path / "two.db")
+
+        first_one = _insert_active(store_one, "alpha", "fact:alpha")
+        _insert_active(store_one, "beta", "fact:beta")
+        second_two = _insert_active(store_two, "xray", "fact:xray")
+
+        invalidate_graph_cache()
+        scores_one = compute_global_pagerank(store_one)
+        scores_two = compute_global_pagerank(store_two)
+
+        assert first_one in scores_one
+        assert second_two in scores_two
+        assert first_one not in scores_two
+
 
 # ─── personalized_pagerank unit tests ─────────────────────────
 

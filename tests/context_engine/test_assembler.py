@@ -7,6 +7,8 @@ from agent.context_engine.assembler import (
     ContextAssembler,
     STABLE_FACTORIES,
     DYNAMIC_FACTORIES,
+    _identity_factory,
+    _project_context_factory,
 )
 from agent.context_engine.context import AssemblyContext
 from agent.context_engine.models import ContextChunk, AssemblyResult
@@ -94,6 +96,70 @@ class TestAssemblerStable:
         assembler = ContextAssembler(mock_agent, stable_factories=factories)
         result = assembler.assemble_stable()
         assert [c.source for c in result.stable_chunks] == ["first", "second", "third"]
+
+    def test_assemble_stable_respects_skip_context_files(self):
+        """T9.x: skip_context_files disables SOUL and project-context sources."""
+        mock_agent = MagicMock()
+        mock_agent.skip_context_files = True
+        mock_agent._context_cwd = "/workspace"
+        mock_agent._honcho_config = None
+        mock_agent.model = None
+        mock_agent.provider = None
+        mock_agent.session_id = None
+        mock_agent.platform = None
+        mock_agent.pass_session_id = False
+
+        with (
+            patch("agent.context_engine.sources.wrap_load_soul_md", return_value=("SOUL", None)) as mock_soul,
+            patch(
+                "agent.context_engine.compat.wrap_build_context_files_prompt",
+                return_value=("# Project Context", None),
+            ) as mock_context,
+        ):
+            assembler = ContextAssembler(
+                mock_agent,
+                stable_factories=[
+                    ("identity", _identity_factory),
+                    ("project_context", _project_context_factory),
+                ],
+            )
+            result = assembler.assemble_stable()
+
+        assert "SOUL" not in result.stable_system
+        assert "# Project Context" not in result.stable_system
+        mock_soul.assert_not_called()
+        mock_context.assert_not_called()
+
+    def test_assemble_stable_does_not_duplicate_soul(self):
+        """T9.x: SOUL belongs to identity slot only, not project context too."""
+        mock_agent = MagicMock()
+        mock_agent.skip_context_files = False
+        mock_agent._context_cwd = "/workspace"
+        mock_agent._honcho_config = None
+        mock_agent.model = None
+        mock_agent.provider = None
+        mock_agent.session_id = None
+        mock_agent.platform = None
+        mock_agent.pass_session_id = False
+
+        with (
+            patch("agent.context_engine.sources.wrap_load_soul_md", return_value=("SOUL", None)),
+            patch(
+                "agent.context_engine.compat.wrap_build_context_files_prompt",
+                return_value=("# Project Context", None),
+            ) as mock_context,
+        ):
+            assembler = ContextAssembler(
+                mock_agent,
+                stable_factories=[
+                    ("identity", _identity_factory),
+                    ("project_context", _project_context_factory),
+                ],
+            )
+            result = assembler.assemble_stable()
+
+        assert result.stable_system.count("SOUL") == 1
+        mock_context.assert_called_once_with(cwd="/workspace", skip_soul=True)
 
 
 class TestAssemblerDynamic:

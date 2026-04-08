@@ -92,6 +92,12 @@ def _mock_response(content="Final answer", finish_reason="stop"):
 
 @pytest.fixture()
 def sparkgraph_agent():
+    def _registry_defs(tool_names, quiet=False):
+        names = set(tool_names or [])
+        if "sparkgraph_record" not in names:
+            return []
+        return _make_tool_defs("sparkgraph_record")
+
     with (
         patch(
             "run_agent.get_tool_definitions",
@@ -99,6 +105,7 @@ def sparkgraph_agent():
         ),
         patch("run_agent.check_toolset_requirements", return_value={}),
         patch("run_agent.OpenAI"),
+        patch("tools.registry.registry.get_definitions", side_effect=_registry_defs),
     ):
         agent = run_agent.AIAgent(
             api_key="test-key",

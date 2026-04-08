@@ -54,3 +54,13 @@ def test_empty_nodes_returns_empty():
     block, ids = build_recall_payload([])
     assert block == ""
     assert ids == []
+
+
+def test_edges_use_summary_labels_when_available():
+    nodes = [
+        _node("n1", "Redis bind config"),
+        _node("n2", "Docker daemon must be running", node_type="ISSUE"),
+    ]
+    edges = [{"from_id": "n1", "to_id": "n2", "type": "RELATED_TO"}]
+    block, _ = build_recall_payload(nodes, edges=edges)
+    assert "Redis bind config --[RELATED_TO]--> Docker daemon must be running" in block

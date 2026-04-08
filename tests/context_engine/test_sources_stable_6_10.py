@@ -172,6 +172,17 @@ class TestProjectContextSource:
             chunks = src.collect(AssemblyContext(agent=MagicMock()))
             assert chunks[0].content == "# AGENTS.md content"
 
+    def test_project_context_source_disabled(self):
+        """T7.x: enabled=False skips context-file loading entirely."""
+        with patch(
+            "agent.context_engine.compat.wrap_build_context_files_prompt",
+            return_value=("# AGENTS.md content", None),
+        ) as mock_fn:
+            src = ProjectContextSource(cwd="/tmp", enabled=False)
+            chunks = src.collect(AssemblyContext(agent=MagicMock()))
+            assert chunks == []
+            mock_fn.assert_not_called()
+
 
 class TestTimePlatformSource:
     """T7: TimePlatformSource."""

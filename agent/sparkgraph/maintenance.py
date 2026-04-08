@@ -55,7 +55,8 @@ def run_flush_maintenance(
         #    此时 last_recalled_at 仍是最新的召回时间信号。
         #
         # 3. last_recalled_at <= updated_at 且 validated_count == 0：
-        #    从未被计数过的节点（还在等待首次召回），视为新节点，不淘汰。
+        #    从未被计数过的节点，idle 时间退回到 updated_at。
+        #    新节点 updated_at≈now → 不淘汰；长期陈旧的未召回节点则允许自然过期。
         #
         # 覆盖场景：
         #   (a) 正常召回：last_recalled_at(召回时间) > updated_at(上次更新时间) ✓
@@ -64,15 +65,17 @@ def run_flush_maintenance(
         #   (c) 老数据：last_recalled_at=0 <= updated_at(31天前)，validated_count>0
         #       → 用 last_recalled_at=0，validated_count>0 → 走 should_deprecate_active ✓
         #   (d) 新节点：last_recalled_at=0 <= updated_at(now)，validated_count=0
-        #       → reference_ts=now_ts → days_idle=0，不淘汰 ✓
+        #       → reference_ts=updated_at≈now → days_idle=0，不淘汰 ✓
+        #   (e) 老旧未召回节点：last_recalled_at=0 <= updated_at(31天前)，validated_count=0
+        #       → reference_ts=updated_at=31天前 → days_idle=31，可淘汰 ✓
         if last_recall > updated_at:
             reference_ts = last_recall
         elif validated > 0:
             # validated_count>0：节点曾被计数过（last_recalled_at 是可信的最后召回时间）
-            reference_ts = last_recall
+            reference_ts = last_recall or updated_at
         else:
-            # validated_count=0：从未被计数，视为新节点
-            reference_ts = now_ts
+            # validated_count=0：从未被计数，使用 updated_at 区分新节点与长期陈旧节点
+            reference_ts = updated_at
 
         days_idle = max(0, (now_ts - reference_ts) // 86400)
 

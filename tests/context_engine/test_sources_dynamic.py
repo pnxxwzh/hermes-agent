@@ -242,7 +242,29 @@ class TestSparkGraphRecallSource:
             sparkgraph_enabled=True,
         )
         src.collect(AssemblyContext(agent=MagicMock(), user_message="query"))
-        mock_manager.build_recall_block.assert_called_once_with("query", max_nodes=None, max_chars=None)
+        mock_manager.build_recall_block.assert_called_once_with(
+            "query",
+            session_id=None,
+            max_nodes=None,
+            max_chars=None,
+        )
+
+    def test_sparkgraph_session_id_passed(self):
+        """T8.x: session_id is forwarded to the manager recall call."""
+        mock_manager = MagicMock()
+        mock_manager.build_recall_block.return_value = ("", 0)
+        src = SparkGraphRecallSource(
+            sparkgraph_manager=mock_manager,
+            sparkgraph_enabled=True,
+            session_id="sess-123",
+        )
+        src.collect(AssemblyContext(agent=MagicMock(), user_message="query"))
+        mock_manager.build_recall_block.assert_called_once_with(
+            "query",
+            session_id="sess-123",
+            max_nodes=None,
+            max_chars=None,
+        )
 
     def test_sparkgraph_recall_cached_per_turn(self):
         """T8.x: second collect in the same turn reuses cached recall."""
@@ -260,7 +282,12 @@ class TestSparkGraphRecallSource:
         first_chunks = src.collect(ctx)
         second_chunks = src.collect(ctx)
 
-        mock_manager.build_recall_block.assert_called_once_with("query", max_nodes=None, max_chars=None)
+        mock_manager.build_recall_block.assert_called_once_with(
+            "query",
+            session_id=None,
+            max_nodes=None,
+            max_chars=None,
+        )
         assert first_chunks[0].content == "[SparkGraph Recall]"
         assert second_chunks[0].content == "[SparkGraph Recall]"
 

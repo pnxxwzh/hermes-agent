@@ -1650,9 +1650,7 @@ class AIAgent:
         if not getattr(review_agent, "_sparkgraph_store", None):
             return False
 
-        from tools.registry import registry as _tool_registry
-
-        sparkgraph_defs = _tool_registry.get_definitions({"sparkgraph_record"}, quiet=True)
+        sparkgraph_defs = self._get_sparkgraph_record_tool_definitions()
         if not sparkgraph_defs:
             return False
 
@@ -1664,6 +1662,34 @@ class AIAgent:
         review_agent.tools = existing_tools + sparkgraph_defs
         review_agent.valid_tool_names = existing_names | {"sparkgraph_record"}
         return True
+
+    @staticmethod
+    def _get_sparkgraph_record_tool_definitions() -> list[dict]:
+        """Return the sparkgraph_record tool definition, tolerating mocked registries.
+
+        Some internal flows (flush/background review) only need the tool schema for
+        a single write-only tool. Prefer the central registry, but fall back to the
+        canonical schema constant if the registry is unavailable or mocked away.
+        """
+        try:
+            from tools.registry import registry as _tool_registry
+
+            defs = _tool_registry.get_definitions({"sparkgraph_record"}, quiet=True)
+            if (
+                isinstance(defs, list)
+                and defs
+                and all(isinstance(item, dict) for item in defs)
+            ):
+                return defs
+        except Exception:
+            pass
+
+        try:
+            from tools.sparkgraph_tool import SPARKGRAPH_RECORD_SCHEMA
+
+            return [{"type": "function", "function": dict(SPARKGRAPH_RECORD_SCHEMA)}]
+        except Exception:
+            return []
 
     def _run_sparkgraph_record_tool(self, function_args: dict, *, source_kind: str = "review") -> str:
         """Execute sparkgraph_record with the current agent's store/session context."""
@@ -5352,9 +5378,7 @@ class AIAgent:
                 tool_defs.append(memory_tool_def)
 
             if sparkgraph_available:
-                from tools.registry import registry as _tool_registry
-
-                sparkgraph_defs = _tool_registry.get_definitions({"sparkgraph_record"}, quiet=True)
+                sparkgraph_defs = self._get_sparkgraph_record_tool_definitions()
                 if sparkgraph_defs:
                     tool_defs.extend(sparkgraph_defs)
 

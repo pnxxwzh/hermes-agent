@@ -61,6 +61,18 @@ class TestIdentitySource:
             chunks = src.collect(AssemblyContext(agent=MagicMock()))
             assert chunks[0].content != ""
 
+    def test_identity_source_can_skip_soul_loading(self):
+        """T6.x: load_soul=False forces default identity even if SOUL exists."""
+        with patch(
+            "agent.context_engine.sources.wrap_load_soul_md",
+            return_value=("you are my agent", None),
+        ) as mock_load:
+            src = IdentitySource(load_soul=False)
+            chunks = src.collect(AssemblyContext(agent=MagicMock()))
+            assert chunks[0].slot == "default"
+            assert chunks[0].content == "You are Hermes Agent"
+            mock_load.assert_not_called()
+
 
 class TestToolGuidanceSource:
     """T6: ToolGuidanceSource."""

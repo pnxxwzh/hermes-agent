@@ -32,10 +32,12 @@ if TYPE_CHECKING:
 
 def _identity_factory(ctx: AssemblyContext) -> list[ContextChunk]:
     from agent.context_engine.sources import IdentitySource
+    skip_context_files = bool(getattr(ctx.agent, "skip_context_files", False))
     source = IdentitySource(
         default_identity=None,  # uses compat constant
         ai_peer_name=getattr(ctx.agent, "_honcho_config", None)
         and getattr(ctx.agent._honcho_config, "ai_peer", None),
+        load_soul=not skip_context_files,
     )
     return source.collect(ctx)
 
@@ -117,8 +119,12 @@ def _skills_factory(ctx: AssemblyContext) -> list[ContextChunk]:
 def _project_context_factory(ctx: AssemblyContext) -> list[ContextChunk]:
     from agent.context_engine.sources import ProjectContextSource
     cwd = getattr(ctx.agent, "_context_cwd", None)
-    skip_soul = False  # handled in compat
-    return ProjectContextSource(cwd=cwd, skip_soul=skip_soul).collect(ctx)
+    skip_context_files = bool(getattr(ctx.agent, "skip_context_files", False))
+    return ProjectContextSource(
+        cwd=cwd,
+        skip_soul=True,
+        enabled=not skip_context_files,
+    ).collect(ctx)
 
 
 def _time_platform_factory(ctx: AssemblyContext) -> list[ContextChunk]:
@@ -154,6 +160,7 @@ def _sparkgraph_factory(ctx: AssemblyContext) -> list[ContextChunk]:
     return SparkGraphRecallSource(
         sparkgraph_manager=manager,
         sparkgraph_enabled=enabled,
+        session_id=getattr(ctx.agent, "session_id", None),
     ).collect(ctx)
 
 

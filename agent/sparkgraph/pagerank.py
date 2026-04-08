@@ -27,7 +27,7 @@ _CACHE_TTL_MS = 30_000
 class _GraphCache:
     """Process-local graph-structure cache. TTL=30s, invalidated on compact."""
 
-    __slots__ = ("adj", "node_ids", "N", "cached_at_ms")
+    __slots__ = ("adj", "node_ids", "N", "cached_at_ms", "cache_key")
 
     def __init__(
         self,
@@ -35,11 +35,13 @@ class _GraphCache:
         node_ids: set[str],
         N: int,
         cached_at_ms: int,
+        cache_key: str = "",
     ):
         self.adj = adj
         self.node_ids = node_ids
         self.N = N
         self.cached_at_ms = cached_at_ms
+        self.cache_key = cache_key
 
     def is_fresh(self) -> bool:
         return (time.time() * 1000 - self.cached_at_ms) < _CACHE_TTL_MS
@@ -57,7 +59,12 @@ def invalidate_graph_cache() -> None:
 def _load_graph(store: "SparkGraphStore") -> _GraphCache:
     """Load undirected adjacency table from the database with 30-second cache."""
     global _graph_cache
-    if _graph_cache is not None and _graph_cache.is_fresh():
+    cache_key = str(getattr(store, "db_path", "") or "")
+    if (
+        _graph_cache is not None
+        and _graph_cache.is_fresh()
+        and _graph_cache.cache_key == cache_key
+    ):
         return _graph_cache
 
     rows = store._conn.execute(
@@ -79,7 +86,7 @@ def _load_graph(store: "SparkGraphStore") -> _GraphCache:
         adj[tid].append(fid)
 
     _graph_cache = _GraphCache(
-        adj, node_ids, len(node_ids), int(time.time() * 1000)
+        adj, node_ids, len(node_ids), int(time.time() * 1000), cache_key
     )
     return _graph_cache
 

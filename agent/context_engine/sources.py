@@ -42,12 +42,16 @@ class IdentitySource:
         self,
         default_identity: str = None,
         ai_peer_name: str | None = None,
+        load_soul: bool = True,
     ):
         self._default = default_identity or "You are Hermes Agent"
         self._ai_peer = ai_peer_name
+        self._load_soul = load_soul
 
     def collect(self, ctx: AssemblyContext) -> list[ContextChunk]:
-        soul_content, _ = wrap_load_soul_md()
+        soul_content = ""
+        if self._load_soul:
+            soul_content, _ = wrap_load_soul_md()
         has_soul = bool(soul_content)
 
         if has_soul:
@@ -391,11 +395,15 @@ class ProjectContextSource:
         self,
         cwd: str | None = None,
         skip_soul: bool = False,
+        enabled: bool = True,
     ):
         self._cwd = cwd
         self._skip_soul = skip_soul
+        self._enabled = enabled
 
     def collect(self, ctx: AssemblyContext) -> list[ContextChunk]:
+        if not self._enabled:
+            return []
         from agent.context_engine.compat import wrap_build_context_files_prompt
         content, err = wrap_build_context_files_prompt(
             cwd=self._cwd or ctx.cwd,
@@ -591,9 +599,11 @@ class SparkGraphRecallSource:
         self,
         sparkgraph_manager=None,
         sparkgraph_enabled: bool = False,
+        session_id: str | None = None,
     ):
         self._manager = sparkgraph_manager
         self._enabled = sparkgraph_enabled
+        self._session_id = session_id
 
     def collect(self, ctx: AssemblyContext) -> list[ContextChunk]:
         from agent.context_engine.compat import wrap_sparkgraph_build_recall
@@ -607,6 +617,7 @@ class SparkGraphRecallSource:
                 self._manager,
                 self._enabled,
                 user_message=ctx.user_message or "",
+                session_id=self._session_id,
             )
             if agent is not None:
                 setattr(agent, "_sparkgraph_turn_context", content or "")

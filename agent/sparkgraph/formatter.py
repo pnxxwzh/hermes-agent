@@ -11,8 +11,18 @@ def _format_edge(edge: dict[str, Any], nodes_map: dict[str, dict[str, Any]]) -> 
     to_id = str(edge.get("to_id") or "")
     edge_type = str(edge.get("type") or "")
 
-    from_name = nodes_map.get(from_id, {}).get("name") or from_id[:8]
-    to_name = nodes_map.get(to_id, {}).get("name") or to_id[:8]
+    from_node = nodes_map.get(from_id, {})
+    to_node = nodes_map.get(to_id, {})
+    from_name = (
+        from_node.get("summary")
+        or from_node.get("name")
+        or from_id[:8]
+    )
+    to_name = (
+        to_node.get("summary")
+        or to_node.get("name")
+        or to_id[:8]
+    )
 
     return f"  {from_name} --[{edge_type}]--> {to_name}"
 
@@ -104,4 +114,3 @@ def _trim_to_fit(lines: list[str], max_chars: int) -> list[str]:
     while len(lines) > 2 and len("\n".join(lines)) > max_chars:
         lines.pop()
     return lines
-

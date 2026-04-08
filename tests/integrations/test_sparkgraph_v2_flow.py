@@ -150,8 +150,7 @@ class TestMaintenanceDeprecation:
                 source_kind="auto",
             )
         )
-        # Simulate old last_recalled_at (30+ days ago) with validated_count>0
-        # (validated_count=0 means "never recalled" → reference_ts=now → never deprecated)
+        # Simulate old last_recalled_at (30+ days ago) with validated_count>0.
         old_ts = int(time.time()) - (31 * 86400)
         store._conn.execute(
             "UPDATE sg_nodes SET last_recalled_at = ?, updated_at = ?, validated_count = 1 WHERE id = ?",
