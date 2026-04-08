@@ -770,40 +770,56 @@ def run_doctor(args):
         check_warn("No GITHUB_TOKEN", f"(60 req/hr rate limit — set in {_DHH}/.env for better rates)")
 
     # =========================================================================
-    # Honcho memory
+    # Memory Provider (only check the active provider, if any)
     # =========================================================================
     print()
-    print(color("◆ Honcho Memory", Colors.CYAN, Colors.BOLD))
+    print(color("◆ Memory Provider", Colors.CYAN, Colors.BOLD))
 
+    _active_memory_provider = ""
     try:
-        from honcho_integration.client import HonchoClientConfig, resolve_config_path
-        hcfg = HonchoClientConfig.from_global_config()
-        _honcho_cfg_path = resolve_config_path()
+        _mem_cfg = load_config().get("memory", {})
+        if isinstance(_mem_cfg, dict):
+            _active_memory_provider = str(_mem_cfg.get("provider", "") or "").strip().lower()
+    except Exception:
+        pass
 
-        if not _honcho_cfg_path.exists():
-            check_warn("Honcho config not found", "run: hermes honcho setup")
-        elif not hcfg.enabled:
-            check_info(f"Honcho disabled (set enabled: true in {_honcho_cfg_path} to activate)")
-        elif not (hcfg.api_key or hcfg.base_url):
-            check_fail("Honcho API key or base URL not set", "run: hermes honcho setup")
-            issues.append("No Honcho API key — run 'hermes honcho setup'")
-        else:
-            from honcho_integration.client import get_honcho_client, reset_honcho_client
-            reset_honcho_client()
-            try:
-                get_honcho_client(hcfg)
-                check_ok(
-                    "Honcho connected",
-                    f"workspace={hcfg.workspace_id} mode={hcfg.memory_mode} freq={hcfg.write_frequency}",
-                )
-            except Exception as _e:
-                check_fail("Honcho connection failed", str(_e))
-                issues.append(f"Honcho unreachable: {_e}")
-    except ImportError:
-        check_warn("honcho-ai not installed", "pip install honcho-ai")
-    except Exception as _e:
-        check_warn("Honcho check failed", str(_e))
+    if not _active_memory_provider:
+        check_ok("Built-in memory active", "(no external provider configured — this is fine)")
+    elif _active_memory_provider == "honcho":
+        try:
+            from honcho_integration.client import HonchoClientConfig, resolve_config_path
+            hcfg = HonchoClientConfig.from_global_config()
+            _honcho_cfg_path = resolve_config_path()
 
+            if not _honcho_cfg_path.exists():
+                check_warn("Honcho config not found", "run: hermes honcho setup")
+            elif not hcfg.enabled:
+                check_info(f"Honcho disabled (set enabled: true in {_honcho_cfg_path} to activate)")
+            elif not (hcfg.api_key or hcfg.base_url):
+                check_fail("Honcho API key or base URL not set", "run: hermes honcho setup")
+                issues.append("No Honcho API key — run 'hermes honcho setup'")
+            else:
+                from honcho_integration.client import get_honcho_client, reset_honcho_client
+                reset_honcho_client()
+                try:
+                    get_honcho_client(hcfg)
+                    check_ok(
+                        "Honcho connected",
+                        f"workspace={hcfg.workspace_id} mode={hcfg.memory_mode} freq={hcfg.write_frequency}",
+                    )
+                except Exception as _e:
+                    check_fail("Honcho connection failed", str(_e))
+                    issues.append(f"Honcho unreachable: {_e}")
+        except ImportError:
+            check_fail("honcho-ai not installed", "pip install honcho-ai")
+            issues.append("Honcho is set as memory provider but honcho-ai is not installed")
+        except Exception as _e:
+            check_warn("Honcho check failed", str(_e))
+    else:
+        check_warn(
+            f"{_active_memory_provider} memory provider configured",
+            "(no dedicated doctor checks in this build)",
+        )
     # =========================================================================
     # Profiles
     # =========================================================================

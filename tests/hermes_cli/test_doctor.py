@@ -357,3 +357,66 @@ def test_check_sparkgraph_warns_on_last_failed_eval(monkeypatch, tmp_path, capsy
     out = capsys.readouterr().out
     assert "Last SparkGraph flush eval has failures" in out
     assert "Rerun SparkGraph flush eval and inspect failing fixtures" in issues
+
+
+class TestDoctorMemoryProviderSection:
+    """The ◆ Memory Provider section should respect memory.provider config."""
+
+    def _make_hermes_home(self, tmp_path, provider=""):
+        home = tmp_path / ".hermes"
+        home.mkdir(parents=True, exist_ok=True)
+        import yaml
+        config = {"memory": {"provider": provider}} if provider else {"memory": {}}
+        (home / "config.yaml").write_text(yaml.dump(config))
+        return home
+
+    def _run_doctor_and_capture(self, monkeypatch, tmp_path, provider=""):
+        home = self._make_hermes_home(tmp_path, provider)
+        monkeypatch.setattr(doctor_mod, "HERMES_HOME", home)
+        monkeypatch.setattr(doctor_mod, "PROJECT_ROOT", tmp_path / "project")
+        monkeypatch.setattr(doctor_mod, "_DHH", str(home))
+        monkeypatch.setattr(
+            doctor_mod,
+            "load_config",
+            lambda: {"memory": {"provider": provider}} if provider else {"memory": {}},
+        )
+        (tmp_path / "project").mkdir(exist_ok=True)
+
+        fake_model_tools = types.SimpleNamespace(
+            check_tool_availability=lambda *a, **kw: ([], []),
+            TOOLSET_REQUIREMENTS={},
+        )
+        monkeypatch.setitem(sys.modules, "model_tools", fake_model_tools)
+
+        try:
+            from hermes_cli import auth as _auth_mod
+            monkeypatch.setattr(_auth_mod, "get_nous_auth_status", lambda: {})
+            monkeypatch.setattr(_auth_mod, "get_codex_auth_status", lambda: {})
+        except Exception:
+            pass
+
+        import io
+        import contextlib
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            doctor_mod.run_doctor(Namespace(fix=False))
+        return buf.getvalue()
+
+    def test_no_provider_shows_builtin_ok(self, monkeypatch, tmp_path):
+        out = self._run_doctor_and_capture(monkeypatch, tmp_path, provider="")
+        assert "Memory Provider" in out
+        assert "Built-in memory active" in out
+        assert "Honcho connected" not in out
+
+    def test_unknown_provider_warns_without_false_failures(self, monkeypatch, tmp_path):
+        out = self._run_doctor_and_capture(monkeypatch, tmp_path, provider="mem0")
+        assert "Memory Provider" in out
+        assert "mem0 memory provider configured" in out
+        assert "Built-in memory active" not in out
+
+    def test_honcho_provider_not_installed_shows_fail(self, monkeypatch, tmp_path):
+        monkeypatch.setitem(sys.modules, "honcho_integration.client", None)
+        out = self._run_doctor_and_capture(monkeypatch, tmp_path, provider="honcho")
+        assert "Memory Provider" in out
+        assert "honcho-ai not installed" in out
