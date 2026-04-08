@@ -1,3 +1,4 @@
+from __future__ import annotations
 #!/usr/bin/env python3
 """File Tools Module - LLM agent file manipulation tools."""
 
@@ -345,8 +346,6 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
         # ── Perform the read ──────────────────────────────────────────
         file_ops = _get_file_ops(task_id)
         result = file_ops.read_file(path, offset, limit)
-        if result.content:
-            result.content = redact_sensitive_text(result.content)
         result_dict = result.to_dict()
 
         # ── Character-count guard ─────────────────────────────────────
@@ -371,6 +370,10 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
                 "total_lines": total_lines,
                 "file_size": file_size,
             }, ensure_ascii=False)
+
+        if result.content:
+            result.content = redact_sensitive_text(result.content)
+            result_dict["content"] = result.content
 
         # Large-file hint: if the file is big and the caller didn't ask
         # for a narrow window, nudge toward targeted reads.

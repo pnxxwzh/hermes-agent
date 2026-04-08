@@ -1,3 +1,4 @@
+from __future__ import annotations
 """Docker execution environment for sandboxed command execution.
 
 Security hardened (cap-drop ALL, no-new-privileges, PID limits),

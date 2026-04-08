@@ -28,6 +28,12 @@ from hermes_cli.auth import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _isolate_gh_cli_token(monkeypatch):
+    """Keep provider-config tests independent from the host's real gh auth state."""
+    monkeypatch.setattr("hermes_cli.copilot_auth._try_gh_cli_token", lambda: None)
+
+
 # =============================================================================
 # Provider Registry tests
 # =============================================================================

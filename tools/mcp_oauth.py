@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """Thin OAuth adapter for MCP HTTP servers.
 
 Wraps the MCP SDK's built-in ``OAuthClientProvider`` (which implements
@@ -11,8 +13,6 @@ Usage in mcp_tool.py::
     auth = build_oauth_auth(server_name, server_url)
     # pass ``auth`` as the httpx auth parameter
 """
-
-from __future__ import annotations
 
 import asyncio
 import json

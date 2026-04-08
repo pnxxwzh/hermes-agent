@@ -182,7 +182,7 @@ def _get_provider(stt_config: dict) -> str:
         if provider == "local":
             if _HAS_FASTER_WHISPER:
                 return "local"
-            if _has_local_command():
+            if os.getenv(LOCAL_STT_COMMAND_ENV, "").strip():
                 return "local_command"
             logger.warning(
                 "STT provider 'local' configured but unavailable "

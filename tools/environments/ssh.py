@@ -1,3 +1,4 @@
+from __future__ import annotations
 """SSH remote execution environment with ControlMaster connection persistence."""
 
 import logging

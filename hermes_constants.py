@@ -6,6 +6,7 @@ without risk of circular imports.
 
 import os
 from pathlib import Path
+from typing import Dict, Optional
 
 
 def get_hermes_home() -> Path:
@@ -17,7 +18,7 @@ def get_hermes_home() -> Path:
     return Path(os.getenv("HERMES_HOME", Path.home() / ".hermes"))
 
 
-def get_optional_skills_dir(default: Path | None = None) -> Path:
+def get_optional_skills_dir(default: Optional[Path] = None) -> Path:
     """Return the optional-skills directory, honoring package-manager wrappers.
 
     Packaged installs may ship ``optional-skills`` outside the Python package
@@ -75,7 +76,7 @@ def display_hermes_home() -> str:
 VALID_REASONING_EFFORTS = ("xhigh", "high", "medium", "low", "minimal")
 
 
-def parse_reasoning_effort(effort: str) -> dict | None:
+def parse_reasoning_effort(effort: str) -> Optional[dict]:
     """Parse a reasoning effort level into a config dict.
 
     Valid levels: "xhigh", "high", "medium", "low", "minimal", "none".

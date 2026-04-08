@@ -17,9 +17,12 @@ def test_parse_sparkgraph_config_uses_profile_scoped_defaults(tmp_path):
     assert config.mode == "flush_integrated"
     assert config.db_path == tmp_path / "sparkgraph" / "default.db"
     assert config.recall.enabled is True
+    assert config.embedding.provider == ""
+    assert config.embedding.model == ""
+    assert config.embedding.base_url == ""
 
 
-def test_parse_sparkgraph_config_honors_custom_db_path(tmp_path):
+def test_parse_sparkgraph_config_still_honors_legacy_custom_db_path(tmp_path):
     custom = tmp_path / "custom" / "sparkgraph.db"
     config = parse_sparkgraph_config({"db_path": str(custom)}, hermes_home=tmp_path)
 
@@ -46,11 +49,6 @@ def test_parse_sparkgraph_config_rejects_non_boolean_recall_enabled(tmp_path):
         parse_sparkgraph_config({"recall": {"enabled": "yes"}}, hermes_home=tmp_path)
 
 
-def test_parse_sparkgraph_config_rejects_invalid_budget_ratio(tmp_path):
-    with pytest.raises(SparkGraphConfigError, match="recall.budget_ratio"):
-        parse_sparkgraph_config({"recall": {"budget_ratio": 1.5}}, hermes_home=tmp_path)
-
-
 def test_parse_sparkgraph_config_rejects_non_mapping_section(tmp_path):
     with pytest.raises(SparkGraphConfigError, match="sparkgraph.embedding"):
         parse_sparkgraph_config({"embedding": "local"}, hermes_home=tmp_path)
@@ -64,4 +62,5 @@ def test_path_helpers_follow_profile_root(tmp_path):
 def test_default_config_shape_matches_v2_minimum_contract():
     assert DEFAULT_SPARKGRAPH_CONFIG["mode"] == "flush_integrated"
     assert DEFAULT_SPARKGRAPH_CONFIG["recall"]["max_items"] == 4
+    assert "db_path" not in DEFAULT_SPARKGRAPH_CONFIG
     assert "shadow_extractor" not in DEFAULT_SPARKGRAPH_CONFIG

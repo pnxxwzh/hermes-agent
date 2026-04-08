@@ -205,12 +205,10 @@ DEFAULT_CONFIG = {
     "toolsets": ["hermes-cli"],
     "sparkgraph": {
         "mode": "flush_integrated",
-        "db_path": "",
         "recall": {
             "enabled": True,
             "max_items": 4,
             "max_related": 4,
-            "budget_ratio": 0.12,
             "max_chars": 1800,
         },
         "embedding": {
@@ -229,6 +227,22 @@ DEFAULT_CONFIG = {
         # (force on/off for all models), or a list of model-name substrings
         # to match (e.g. ["gpt", "codex", "gemini", "qwen"]).
         "tool_use_enforcement": "auto",
+        "context_engine": {
+            "unified_input_engine": False,
+            "unified_input_shadow_compare": True,
+            "unified_input_compare_fail_fast": False,
+            "tool_compaction": {
+                "enabled": True,
+                "retain_recent_user_turns": 3,
+                "retain_recent_tool_groups_in_turn": 2,
+                "current_turn_tool_budget_chars": 12000,
+                "historical_tool_budget_chars": 24000,
+                "warm_head_chars": 1200,
+                "warm_tail_chars": 400,
+                "cold_head_chars": 400,
+                "cold_tail_chars": 200,
+            },
+        },
     },
     
     "terminal": {

@@ -28,3 +28,4 @@ def test_load_config_exposes_sparkgraph_defaults(tmp_path):
         config = load_config()
     assert "sparkgraph" in config
     assert config["sparkgraph"]["mode"] == "flush_integrated"
+    assert "db_path" not in config["sparkgraph"]

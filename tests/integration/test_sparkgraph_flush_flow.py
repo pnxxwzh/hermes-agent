@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 import run_agent
-from tools.sparkgraph_tool import sparkgraph_search_tool, sparkgraph_stats_tool
+from tools.sparkgraph_tool import sparkgraph_record_tool, sparkgraph_search_tool, sparkgraph_stats_tool
 
 
 def _make_tool_defs(*names: str) -> list:
@@ -92,6 +92,12 @@ def _mock_response(content="Final answer", finish_reason="stop"):
 
 @pytest.fixture()
 def sparkgraph_agent():
+    def _registry_defs(tool_names, quiet=False):
+        names = set(tool_names or [])
+        if "sparkgraph_record" not in names:
+            return []
+        return _make_tool_defs("sparkgraph_record")
+
     with (
         patch(
             "run_agent.get_tool_definitions",
@@ -99,6 +105,7 @@ def sparkgraph_agent():
         ),
         patch("run_agent.check_toolset_requirements", return_value={}),
         patch("run_agent.OpenAI"),
+        patch("tools.registry.registry.get_definitions", side_effect=_registry_defs),
     ):
         agent = run_agent.AIAgent(
             api_key="test-key",
@@ -133,7 +140,7 @@ def test_fact_flush_writes_graph_and_later_turn_recalls(sparkgraph_agent):
 
     rows = agent._sparkgraph_store.search_nodes("socksio", status="active", limit=4)
     assert rows, "Expected SparkGraph flush to create an active node"
-    recall_block = agent._sparkgraph_manager.build_recall_block(
+    recall_block, _ = agent._sparkgraph_manager.build_recall_block(
         "socksio may be required for SOCKS proxy support"
     )
     assert "[SparkGraph Recall]" in recall_block
@@ -187,12 +194,13 @@ def test_preference_flush_writes_graph_and_later_turn_recalls(sparkgraph_agent):
     rows = agent._sparkgraph_store.search_nodes("concise replies", status="active", limit=4)
     assert rows, "Expected SparkGraph flush to create an active preference node"
 
-    recall_block = agent._sparkgraph_manager.build_recall_block("concise replies")
+    recall_block, _ = agent._sparkgraph_manager.build_recall_block("concise replies")
     assert "[SparkGraph Recall]" in recall_block
     assert "User prefers concise replies" in recall_block
 
 
 def test_query_tools_can_inspect_flush_written_nodes(sparkgraph_agent):
+    """sparkgraph_search and sparkgraph_stats are still callable as library functions."""
     agent = sparkgraph_agent
     messages = [
         {"role": "user", "content": "Can we keep things concise?"},

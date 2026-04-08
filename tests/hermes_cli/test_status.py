@@ -29,7 +29,6 @@ def test_show_status_includes_sparkgraph_section(monkeypatch, capsys, tmp_path):
                 "enabled": True,
                 "max_items": 3,
                 "max_related": 2,
-                "budget_ratio": 0.12,
                 "max_chars": 1200,
             },
             "embedding": {

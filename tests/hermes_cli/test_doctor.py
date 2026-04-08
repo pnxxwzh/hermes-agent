@@ -152,7 +152,6 @@ def test_check_sparkgraph_reports_ready_without_network_probe(monkeypatch, tmp_p
                     "enabled": True,
                     "max_items": 4,
                     "max_related": 4,
-                    "budget_ratio": 0.12,
                     "max_chars": 1800,
                 },
                 "embedding": {
@@ -205,7 +204,6 @@ def test_check_sparkgraph_runtime_ready_when_db_parent_exists(monkeypatch, tmp_p
                     "enabled": True,
                     "max_items": 4,
                     "max_related": 4,
-                    "budget_ratio": 0.12,
                     "max_chars": 1800,
                 },
                 "embedding": {
@@ -268,7 +266,6 @@ def test_check_sparkgraph_enables_probe_when_requested(monkeypatch, tmp_path, ca
                     "enabled": True,
                     "max_items": 4,
                     "max_related": 4,
-                    "budget_ratio": 0.12,
                     "max_chars": 1800,
                 },
                 "embedding": {
@@ -321,7 +318,6 @@ def test_check_sparkgraph_warns_on_last_failed_eval(monkeypatch, tmp_path, capsy
                     "enabled": True,
                     "max_items": 4,
                     "max_related": 4,
-                    "budget_ratio": 0.12,
                     "max_chars": 1800,
                 },
                 "embedding": {

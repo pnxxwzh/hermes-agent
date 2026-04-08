@@ -1,175 +1,95 @@
-"""SparkGraph scoring and status-transition helpers."""
+"""SparkGraph scoring — simplified, aligned with graph-memory.
+
+核心原则（来源即命运）：
+  - 新节点写入时由 source_kind 直接决定 status 和 confidence
+  - 无 CANDIDATE 晋升路径
+  - 无 evidence 累积逻辑
+  - recall 排序由 validated_count + PPR + sourceKind补偿 驱动
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
-from agent.sparkgraph.types import NodeType
 from agent.sparkgraph.types import NodeStatus
 
-SOURCE_SCORES = {
-    "manual": 1.00,
-    "review": 0.92,
-    "explicit": 0.88,
-    "flush": 0.72,
-    "auto": 0.72,
-    "reflection": 0.58,
-    "shadow": 0.50,
+# ─── Source kind → initial confidence (direct lookup, no formula) ──
+SOURCE_CONFIDENCE: dict[str, float] = {
+    "manual":    0.90,
+    "review":    0.92,
+    "explicit":  0.88,
+    "flush":     0.72,
+    "auto":      0.72,
+    "reflection": 0.50,
+    "shadow":    0.50,
 }
 
-SESSION_BOUND_PENALTY = 0.35
-ACTIVE_CONFIDENCE_THRESHOLD = 0.70
-ACTIVE_STABILITY_THRESHOLD = 0.65
-DEPRECATE_STABILITY_THRESHOLD = 0.45
-DEPRECATE_SUPPORT_THRESHOLD = 0.35
-STALE_RECALL_DAYS = 30
-TYPE_PRIORS = {
-    NodeType.FACT: {"stability": 0.70, "reuse_score": 0.68},
-    NodeType.PREFERENCE: {"stability": 0.80, "reuse_score": 0.78},
-    NodeType.ISSUE: {"stability": 0.62, "reuse_score": 0.66},
-    NodeType.RESOURCE: {"stability": 0.58, "reuse_score": 0.60},
-    NodeType.DECISION: {"stability": 0.66, "reuse_score": 0.70},
+# ─── Recall ranking (graph-memory style) ───────────────────────────
+# PPR 权重 1000，validated_count 权重封顶 20×5=100，confidence 权重 100
+_SOURCE_BONUS: dict[str, float] = {
+    "explicit":  80.0,
+    "manual":    40.0,
+    "review":    40.0,
+    "flush":      0.0,
+    "auto":       0.0,
+    "reflection": 0.0,
+    "shadow":     0.0,
 }
+
+# ─── Deprecation thresholds ────────────────────────────────────────
+STALE_RECALL_DAYS = 30
+
+
+# ─── Dataclass ────────────────────────────────────────────────────
 
 
 @dataclass(frozen=True)
-class ScoreBreakdown:
+class InitialScore:
+    """写入节点时的初始状态和 confidence。"""
+
     confidence: float
-    stability: float
-    reuse_score: float
-    support_score: float
-    source_score: float
-    session_bound_penalty: float
-    confidence_components: dict
+    initial_status: NodeStatus
 
 
-def _clamp(value: float) -> float:
-    return max(0.0, min(1.0, round(value, 4)))
+# ─── Public API ───────────────────────────────────────────────────
 
 
-def source_score(source_kind: str) -> float:
-    return SOURCE_SCORES.get(source_kind, SOURCE_SCORES["auto"])
+def initial_score_for(source_kind: str) -> InitialScore:
+    """来源即命运：无公式，直接查表。"""
+    return InitialScore(
+        confidence=SOURCE_CONFIDENCE.get(source_kind, 0.72),
+        initial_status=NodeStatus.ACTIVE,
+    )
 
 
-def default_type_priors(node_type: NodeType) -> dict[str, float]:
-    return dict(TYPE_PRIORS[node_type])
-
-
-def support_score(*, evidence_count: int, active_edge_count: int = 0, recall_hits: int = 0) -> float:
-    evidence_component = min(max(evidence_count, 0) / 3.0, 1.0) * 0.6
-    edge_component = min(max(active_edge_count, 0) / 2.0, 1.0) * 0.25
-    recall_component = min(max(recall_hits, 0) / 3.0, 1.0) * 0.15
-    return _clamp(evidence_component + edge_component + recall_component)
-
-
-def compute_scores(
+def recall_priority_score(
     *,
-    source_kind: str,
-    evidence_count: int,
-    stability: float,
-    reuse_score: float,
-    active_edge_count: int = 0,
-    recall_hits: int = 0,
-    session_bound: bool = False,
-    durability_score: float | None = None,
-    dedup_consistency_bonus: float = 0.0,
-) -> ScoreBreakdown:
-    src = source_score(source_kind)
-    support = support_score(
-        evidence_count=evidence_count,
-        active_edge_count=active_edge_count,
-        recall_hits=recall_hits,
-    )
-    stability_value = _clamp(stability)
-    reuse_value = _clamp(reuse_score)
-    durability_value = stability_value if durability_score is None else _clamp(durability_score)
-    penalty = SESSION_BOUND_PENALTY if session_bound else 0.0
-
-    confidence = _clamp(
-        (src * 0.30)
-        + (durability_value * 0.20)
-        + (reuse_value * 0.15)
-        + (stability_value * 0.15)
-        + (support * 0.15)
-        + max(0.0, dedup_consistency_bonus)
-        - penalty
-    )
-
-    return ScoreBreakdown(
-        confidence=confidence,
-        stability=stability_value,
-        reuse_score=reuse_value,
-        support_score=support,
-        source_score=src,
-        session_bound_penalty=penalty,
-        confidence_components={
-            "source_score": src,
-            "durability_score": durability_value,
-            "reuse_score": reuse_value,
-            "stability": stability_value,
-            "support_score": support,
-            "dedup_consistency_bonus": max(0.0, dedup_consistency_bonus),
-            "session_bound_penalty": penalty,
-        },
-    )
-
-
-def should_promote_candidate(
-    *,
-    source_kind: str,
+    ppr_score: float,
+    validated_count: int,
     confidence: float,
-    stability: float,
-    evidence_count: int,
-    session_bound: bool = False,
-    relation_supported: bool = False,
-    dedup_blocked: bool = False,
-) -> bool:
-    if session_bound or dedup_blocked:
-        return False
-    if source_kind in {"manual", "review", "explicit"}:
-        return True
-    if confidence >= ACTIVE_CONFIDENCE_THRESHOLD and stability >= ACTIVE_STABILITY_THRESHOLD and evidence_count >= 2:
-        return True
-    if relation_supported and confidence >= 0.72 and stability >= ACTIVE_STABILITY_THRESHOLD:
-        return True
-    return False
+    source_kind: str,
+    superseded: bool,
+) -> float:
+    """graph-memory 风格召回排序分。
+
+    score = PPR×1000 + sourceKindBonus + validatedCount×5(封顶20) + confidence×100 - superseded×500
+    """
+    score = ppr_score * 1000.0
+    score += _SOURCE_BONUS.get(source_kind, 0.0)
+    score += min(validated_count, 20) * 5.0
+    score += confidence * 100.0
+    if superseded:
+        score -= 500.0
+    return score
 
 
 def should_deprecate_active(
     *,
-    superseded: bool = False,
-    merged: bool = False,
-    days_since_recall_hit: int = 0,
-    support_score_value: float = 1.0,
-    stability: float = 1.0,
+    days_since_recall_hit: int,
+    validated_count: int,
 ) -> bool:
-    if superseded or merged:
+    """30天无召回 + 低 validated_count → deprecated。"""
+    if days_since_recall_hit >= STALE_RECALL_DAYS and validated_count <= 1:
         return True
-    return (
-        days_since_recall_hit >= STALE_RECALL_DAYS
-        and support_score_value < DEPRECATE_SUPPORT_THRESHOLD
-        and stability < DEPRECATE_STABILITY_THRESHOLD
-    )
-
-
-def next_status_for_candidate(
-    *,
-    source_kind: str,
-    confidence: float,
-    stability: float,
-    evidence_count: int,
-    session_bound: bool = False,
-    relation_supported: bool = False,
-    dedup_blocked: bool = False,
-) -> NodeStatus:
-    if should_promote_candidate(
-        source_kind=source_kind,
-        confidence=confidence,
-        stability=stability,
-        evidence_count=evidence_count,
-        session_bound=session_bound,
-        relation_supported=relation_supported,
-        dedup_blocked=dedup_blocked,
-    ):
-        return NodeStatus.ACTIVE
-    return NodeStatus.CANDIDATE
+    return False

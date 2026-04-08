@@ -15,6 +15,7 @@ class NodeType(str, Enum):
 
 class EdgeType(str, Enum):
     RELATED_TO = "RELATED_TO"
+    SOLVES = "SOLVES"
     DEPENDS_ON = "DEPENDS_ON"
     CONFLICTS_WITH = "CONFLICTS_WITH"
     DERIVED_FROM = "DERIVED_FROM"
@@ -22,6 +23,10 @@ class EdgeType(str, Enum):
 
 
 class NodeStatus(str, Enum):
-    CANDIDATE = "candidate"
+    """两状态：active（可召回）/ deprecated（不可召回）。
+
+    无 CANDIDATE 中间态——来源即命运，写入时直接决定状态。
+    """
+
     ACTIVE = "active"
     DEPRECATED = "deprecated"

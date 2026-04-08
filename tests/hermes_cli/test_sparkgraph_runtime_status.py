@@ -15,7 +15,6 @@ def test_sparkgraph_runtime_status_reads_current_profile_config(tmp_path, monkey
                     "enabled": True,
                     "max_items": 4,
                     "max_related": 4,
-                    "budget_ratio": 0.12,
                     "max_chars": 1800,
                 },
                 "embedding": {
@@ -51,7 +50,6 @@ def test_sparkgraph_runtime_status_does_not_probe_network(tmp_path, monkeypatch)
                     "enabled": True,
                     "max_items": 4,
                     "max_related": 4,
-                    "budget_ratio": 0.12,
                     "max_chars": 1800,
                 },
                 "embedding": {
@@ -93,7 +91,6 @@ def test_sparkgraph_runtime_status_can_probe_when_explicitly_enabled(tmp_path, m
                     "enabled": True,
                     "max_items": 4,
                     "max_related": 4,
-                    "budget_ratio": 0.12,
                     "max_chars": 1800,
                 },
                 "embedding": {

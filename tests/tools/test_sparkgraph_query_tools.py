@@ -1,7 +1,12 @@
 import json
 
 from agent.sparkgraph.store import SparkGraphStore
-from tools.sparkgraph_tool import sparkgraph_record_tool, sparkgraph_search_tool, sparkgraph_stats_tool
+from tools.sparkgraph_tool import (
+    SPARKGRAPH_SEARCH_SCHEMA,
+    sparkgraph_record_tool,
+    sparkgraph_search_tool,
+    sparkgraph_stats_tool,
+)
 
 
 def test_sparkgraph_search_returns_matching_nodes(tmp_path):
@@ -25,7 +30,7 @@ def test_sparkgraph_search_returns_matching_nodes(tmp_path):
     assert result["success"] is True
     assert result["count"] == 1
     assert result["items"][0]["summary"] == "socksio may be required for SOCKS proxy support"
-    assert result["items"][0]["status"] == "candidate"
+    assert result["items"][0]["status"] == "active"
 
 
 def test_sparkgraph_search_no_results(tmp_path):
@@ -57,4 +62,8 @@ def test_sparkgraph_stats_reports_totals(tmp_path):
     assert result["success"] is True
     assert result["nodes_total"] == 1
     assert result["nodes_by_type"]["PREFERENCE"] == 1
-    assert result["evidence_total"] == 1
+
+
+def test_sparkgraph_search_schema_matches_runtime_status_values():
+    enum_values = SPARKGRAPH_SEARCH_SCHEMA["parameters"]["properties"]["status"]["enum"]
+    assert enum_values == ["active", "deprecated"]

@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from difflib import SequenceMatcher
 
 from agent.sparkgraph.store import SparkGraphStore
-from agent.sparkgraph.types import NodeType
+from agent.sparkgraph.types import NodeStatus, NodeType
 
 NEAR_DUPLICATE_THRESHOLD = 0.6
 FTS_CANDIDATE_LIMIT = 5
@@ -59,15 +59,16 @@ def find_dedup_match(
     canonical_key: str,
 ) -> DedupMatch | None:
     """Find an exact or near-duplicate node candidate."""
-    exact = store.conn.execute(
-        """
-        SELECT id, summary
-        FROM sg_nodes
-        WHERE type = ? AND canonical_key = ?
-        LIMIT 1
-        """,
-        (node_type.value, canonical_key),
-    ).fetchone()
+    with store._conn_lock:
+        exact = store.conn.execute(
+            """
+            SELECT id, summary
+            FROM sg_nodes
+            WHERE type = ? AND canonical_key = ?
+            LIMIT 1
+            """,
+            (node_type.value, canonical_key),
+        ).fetchone()
     if exact:
         return DedupMatch(
             node_id=exact["id"],
@@ -77,18 +78,19 @@ def find_dedup_match(
         )
 
     best: DedupMatch | None = None
-    candidates = [row for row in store.search_nodes(summary)[:FTS_CANDIDATE_LIMIT] if row["type"] == node_type.value]
+    candidates = [row for row in store.search_nodes(summary, status=NodeStatus.ACTIVE.value)[:FTS_CANDIDATE_LIMIT] if row["type"] == node_type.value]
     if not candidates:
-        fallback_rows = store.conn.execute(
-            """
-            SELECT id, summary, type
-            FROM sg_nodes
-            WHERE type = ?
-            ORDER BY updated_at DESC
-            LIMIT 20
-            """,
-            (node_type.value,),
-        ).fetchall()
+        with store._conn_lock:
+            fallback_rows = store.conn.execute(
+                """
+                SELECT id, summary, type
+                FROM sg_nodes
+                WHERE type = ? AND status = ?
+                ORDER BY updated_at DESC
+                LIMIT 20
+                """,
+                (node_type.value, NodeStatus.ACTIVE.value),
+            ).fetchall()
         candidates = [dict(row) for row in fallback_rows]
 
     for row in candidates:
@@ -121,21 +123,22 @@ def find_cross_type_dedup_match(
     best: DedupMatch | None = None
 
     candidates = [
-        row for row in store.search_nodes(summary)[:FTS_CANDIDATE_LIMIT * 2]
+        row for row in store.search_nodes(summary, status=NodeStatus.ACTIVE.value)[:FTS_CANDIDATE_LIMIT * 2]
         if row["type"] in allowed_types
     ]
     if not candidates:
         placeholders = ", ".join("?" for _ in allowed_types)
-        fallback_rows = store.conn.execute(
-            f"""
-            SELECT id, summary, type
-            FROM sg_nodes
-            WHERE type IN ({placeholders})
-            ORDER BY updated_at DESC
-            LIMIT 20
-            """,
-            tuple(sorted(allowed_types)),
-        ).fetchall()
+        with store._conn_lock:
+            fallback_rows = store.conn.execute(
+                f"""
+                SELECT id, summary, type
+                FROM sg_nodes
+                WHERE type IN ({placeholders}) AND status = ?
+                ORDER BY updated_at DESC
+                LIMIT 20
+                """,
+                tuple(sorted(allowed_types)) + (NodeStatus.ACTIVE.value,),
+            ).fetchall()
         candidates = [dict(row) for row in fallback_rows]
 
     for row in candidates:

@@ -375,9 +375,23 @@ def _resolve_gateway_model(config: dict | None = None) -> str:
     cfg = config if config is not None else _load_gateway_config()
     model_cfg = cfg.get("model", {})
     if isinstance(model_cfg, str):
-        return model_cfg
+        model = model_cfg
     elif isinstance(model_cfg, dict):
-        return model_cfg.get("default") or model_cfg.get("model") or ""
+        model = model_cfg.get("default") or model_cfg.get("model") or ""
+    else:
+        model = ""
+
+    model = (model or "").strip()
+    if model:
+        return model
+
+    # Long-lived gateway processes are often configured by env vars in tests,
+    # service managers, or one-shot local runs before config.yaml exists.
+    env_model = (os.getenv("HERMES_MODEL") or "").strip()
+    if env_model:
+        return env_model
+
+    return ""
     return ""
 
 

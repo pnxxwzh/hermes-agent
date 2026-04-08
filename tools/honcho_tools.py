@@ -1,3 +1,4 @@
+from __future__ import annotations
 """Honcho tools for user context retrieval.
 
 Registers three complementary tools, ordered by capability:

@@ -8,6 +8,7 @@ import time
 from types import SimpleNamespace
 import uuid
 
+import agent.credential_pool as credential_pool_mod
 from agent.credential_pool import (
     AUTH_TYPE_API_KEY,
     AUTH_TYPE_OAUTH,
@@ -24,7 +25,6 @@ from agent.credential_pool import (
     get_pool_strategy,
     label_from_token,
     list_custom_pool_providers,
-    load_pool,
     _exhausted_ttl,
 )
 import hermes_cli.auth as auth_mod
@@ -34,6 +34,16 @@ from hermes_constants import OPENROUTER_BASE_URL
 
 # Providers that support OAuth login in addition to API keys.
 _OAUTH_CAPABLE_PROVIDERS = {"anthropic", "nous", "openai-codex"}
+
+
+def _load_pool(provider: str):
+    """Resolve load_pool at call time so monkeypatches do not get captured at import time."""
+    return credential_pool_mod.load_pool(provider)
+
+
+def load_pool(provider: str):
+    """Backward-compatible module attribute that resolves the live pool loader."""
+    return _load_pool(provider)
 
 
 def _get_custom_provider_names() -> list:

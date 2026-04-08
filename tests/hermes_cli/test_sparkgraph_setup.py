@@ -17,7 +17,6 @@ def test_setup_sparkgraph_configures_custom_embedding(tmp_path, monkeypatch):
             "3",  # recall max_items
             "2",  # recall max_related
             "1200",  # recall max_chars
-            "",  # db_path
             "http://127.0.0.1:8000/v1",
             "text-embedding-3-small",
             "embed-key",
@@ -37,6 +36,7 @@ def test_setup_sparkgraph_configures_custom_embedding(tmp_path, monkeypatch):
     assert sg["recall"]["max_items"] == 3
     assert sg["recall"]["max_related"] == 2
     assert sg["recall"]["max_chars"] == 1200
+    assert "db_path" not in sg
     assert sg["embedding"]["provider"] == "openai-compatible"
     assert sg["embedding"]["model"] == "text-embedding-3-small"
     assert sg["embedding"]["base_url"] == "http://127.0.0.1:8000/v1"
@@ -77,31 +77,6 @@ def test_run_setup_wizard_dispatches_sparkgraph_section(tmp_path, monkeypatch):
     assert called["yes"] is True
 
 
-def test_setup_sparkgraph_warns_for_external_db_path(tmp_path, monkeypatch, capsys):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-
-    config = load_config()
-
-    choices = iter([0, 1])  # reconfigure, disable embedding
-    prompts = iter(
-        [
-            "4",  # recall max_items
-            "4",  # recall max_related
-            "1800",  # recall max_chars
-            str(tmp_path / "external" / "sg.db"),
-        ]
-    )
-
-    monkeypatch.setattr("hermes_cli.setup.prompt_yes_no", lambda *a, **kw: True)
-    monkeypatch.setattr("hermes_cli.setup.prompt_choice", lambda *a, **kw: next(choices))
-    monkeypatch.setattr("hermes_cli.setup.prompt", lambda *a, **kw: next(prompts))
-
-    setup_sparkgraph(config)
-
-    output = capsys.readouterr().out
-    assert "outside the current profile scope" in output
-
-
 def test_setup_sparkgraph_keep_current_returns_without_changes(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 
@@ -128,7 +103,31 @@ def test_setup_sparkgraph_restore_defaults_resets_config(tmp_path, monkeypatch):
 
     sg = config["sparkgraph"]
     assert sg["recall"]["enabled"] is True
-    assert sg["db_path"] == ""
+    assert "db_path" not in sg
+
+
+def test_setup_sparkgraph_reconfigure_clears_legacy_db_path(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    config = load_config()
+    config["sparkgraph"]["db_path"] = str(tmp_path / "external" / "sg.db")
+
+    choices = iter([0, 1])  # reconfigure, disable embedding
+    prompts = iter(
+        [
+            "4",
+            "4",
+            "1800",
+        ]
+    )
+
+    monkeypatch.setattr("hermes_cli.setup.prompt_yes_no", lambda *a, **kw: True)
+    monkeypatch.setattr("hermes_cli.setup.prompt_choice", lambda *a, **kw: next(choices))
+    monkeypatch.setattr("hermes_cli.setup.prompt", lambda *a, **kw: next(prompts))
+
+    setup_sparkgraph(config)
+
+    assert "db_path" not in config["sparkgraph"]
 
 
 def test_setup_sparkgraph_probe_reports_embedding_degraded(tmp_path, monkeypatch, capsys):
@@ -142,7 +141,6 @@ def test_setup_sparkgraph_probe_reports_embedding_degraded(tmp_path, monkeypatch
             "3",  # recall max_items
             "2",  # recall max_related
             "1200",  # recall max_chars
-            "",  # db_path
             "http://127.0.0.1:8000/v1",
             "text-embedding-3-small",
             "embed-key",
@@ -175,7 +173,6 @@ def test_setup_sparkgraph_probe_failure_can_restore_defaults(tmp_path, monkeypat
             "4",
             "4",
             "1800",
-            "",
             "http://127.0.0.1:8000/v1",
             "bge-m3",
             "embed-key",
@@ -192,8 +189,12 @@ def test_setup_sparkgraph_probe_failure_can_restore_defaults(tmp_path, monkeypat
 
     setup_sparkgraph(config)
 
+    # After restoring defaults, embedding returns to the empty opt-in defaults.
     assert config["sparkgraph"]["embedding"]["provider"] == ""
     assert config["sparkgraph"]["embedding"]["model"] == ""
+    assert config["sparkgraph"]["embedding"]["base_url"] == ""
+    assert config["sparkgraph"]["embedding"]["api_key"] == ""
+    assert config["sparkgraph"]["embedding"]["timeout"] == 20
 
 
 def test_setup_sparkgraph_embedding_prompt_order(tmp_path, monkeypatch):
@@ -207,7 +208,6 @@ def test_setup_sparkgraph_embedding_prompt_order(tmp_path, monkeypatch):
             "4",
             "4",
             "1800",
-            "",
             "http://127.0.0.1:8000/v1",
             "bge-m3",
             "embed-key",
@@ -301,10 +301,11 @@ def test_setup_sparkgraph_probe_failure_prefers_keep_current_over_reset(tmp_path
 def test_cli_setup_accepts_sparkgraph_section(monkeypatch):
     called = {}
 
-    def fake_cmd_setup(args):
+    def fake_run_setup_wizard(args):
         called["section"] = args.section
 
-    monkeypatch.setattr("hermes_cli.main.cmd_setup", fake_cmd_setup)
+    monkeypatch.setattr("hermes_cli.setup.run_setup_wizard", fake_run_setup_wizard)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(sys, "argv", ["hermes", "setup", "sparkgraph"])
 
     main()

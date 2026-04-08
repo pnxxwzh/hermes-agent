@@ -28,6 +28,91 @@ from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 
+
+# ---------------------------------------------------------------------------
+# Source color and label mapping for context breakdown display
+# ---------------------------------------------------------------------------
+_SOURCE_COLORS = {
+    "stable": "cyan",
+    "memory": "green",
+    "user_profile": "blue",
+    "skills": "yellow",
+    "project_context": "orange",
+    "sparkgraph_recall": "purple",
+    "ephemeral": "bright_black",
+    "plugin": "gray",
+    "honcho_static": "magenta",
+    "honcho_turn": "magenta",
+    "tool_guidance": "bright_cyan",
+    "tool_use_enforcement": "bright_cyan",
+    "identity": "bright_blue",
+    "system_message": "bright_green",
+    "time_platform": "bright_black",
+    "context_identity": "bright_blue",
+    "context_tool_guidance": "bright_cyan",
+    "context_tool_use_enforcement": "bright_cyan",
+    "context_honcho_static": "magenta",
+    "context_system_message": "bright_green",
+    "context_memory": "green",
+    "context_user_profile": "blue",
+    "context_skills": "yellow",
+    "context_project": "orange",
+    "context_time_platform": "bright_black",
+    "context_ephemeral": "bright_black",
+    "context_plugin": "gray",
+    "context_sparkgraph_recall": "purple",
+    "context_honcho_turn": "magenta",
+    "messages_user": "bright_blue",
+    "messages_assistant": "bright_green",
+    "messages_tool": "bright_magenta",
+    "messages_tool_hot": "bright_magenta",
+    "messages_tool_warm": "magenta",
+    "messages_tool_cold": "purple",
+    "messages_other": "white",
+    "prefill_messages": "cyan",
+    "tool_schemas": "bright_yellow",
+}
+_SOURCE_LABELS = {
+    "stable": "stable",
+    "memory": "memory",
+    "user_profile": "user",
+    "skills": "skills",
+    "project_context": "project",
+    "sparkgraph_recall": "SG",
+    "ephemeral": "ephemeral",
+    "plugin": "plugin",
+    "honcho_static": "honcho",
+    "honcho_turn": "honcho_turn",
+    "tool_guidance": "tool_guidance",
+    "tool_use_enforcement": "tool_enforce",
+    "identity": "identity",
+    "system_message": "system",
+    "time_platform": "time",
+    "context_identity": "identity",
+    "context_tool_guidance": "tool_guidance",
+    "context_tool_use_enforcement": "tool_enforce",
+    "context_honcho_static": "honcho",
+    "context_system_message": "system",
+    "context_memory": "memory",
+    "context_user_profile": "user",
+    "context_skills": "skills",
+    "context_project": "project",
+    "context_time_platform": "time",
+    "context_ephemeral": "ephemeral",
+    "context_plugin": "plugin",
+    "context_sparkgraph_recall": "SG",
+    "context_honcho_turn": "honcho_turn",
+    "messages_user": "msg:user",
+    "messages_assistant": "msg:asst",
+    "messages_tool": "msg:tool",
+    "messages_tool_hot": "msg:tool",
+    "messages_tool_warm": "tool:warm",
+    "messages_tool_cold": "tool:cold",
+    "messages_other": "msg:other",
+    "prefill_messages": "prefill",
+    "tool_schemas": "tools",
+}
+
 logger = logging.getLogger(__name__)
 
 # Suppress startup messages for clean CLI experience
@@ -1282,6 +1367,7 @@ class HermesCLI:
 
         # Status bar visibility (toggled via /statusbar)
         self._status_bar_visible = True
+        self._show_context_breakdown = True  # Phase 2: enabled by default
 
         # Background task tracking: {task_id: threading.Thread}
         self._background_tasks: Dict[str, threading.Thread] = {}
@@ -1306,10 +1392,111 @@ class HermesCLI:
             return "class:status-bar-warn"
         return "class:status-bar-good"
 
-    def _build_context_bar(self, percent_used: Optional[int], width: int = 10) -> str:
+    # ANSI color escapes for embedded bar segment coloring
+    _BAR_ANSI = {
+        "stable": "\033[36m",        # cyan
+        "memory": "\033[32m",        # green
+        "user_profile": "\033[34m",  # blue
+        "skills": "\033[33m",        # yellow
+        "project_context": "\033[38;5;208m",  # orange (#FF9500)
+        "sparkgraph_recall": "\033[35m",  # purple
+        "ephemeral": "\033[90m",     # bright_black
+        "plugin": "\033[90m",         # gray
+        "honcho_static": "\033[95m",  # magenta
+        "honcho_turn": "\033[95m",    # magenta
+        "tool_guidance": "\033[96m",  # bright_cyan
+        "tool_use_enforcement": "\033[96m",  # bright_cyan
+        "identity": "\033[94m",       # bright_blue
+        "system_message": "\033[92m",  # bright_green
+        "time_platform": "\033[90m",  # bright_black
+        "context_identity": "\033[94m",
+        "context_tool_guidance": "\033[96m",
+        "context_tool_use_enforcement": "\033[96m",
+        "context_honcho_static": "\033[95m",
+        "context_system_message": "\033[92m",
+        "context_memory": "\033[32m",
+        "context_user_profile": "\033[34m",
+        "context_skills": "\033[33m",
+        "context_project": "\033[38;5;208m",
+        "context_time_platform": "\033[90m",
+        "context_ephemeral": "\033[90m",
+        "context_plugin": "\033[90m",
+        "context_sparkgraph_recall": "\033[35m",
+        "context_honcho_turn": "\033[95m",
+        "messages_user": "\033[94m",
+        "messages_assistant": "\033[92m",
+        "messages_tool": "\033[95m",
+        "messages_other": "\033[37m",
+        "prefill_messages": "\033[36m",
+        "tool_schemas": "\033[93m",
+    }
+    _BAR_RESET = "\033[0m"
+
+    def _build_context_bar(
+        self,
+        percent_used: Optional[int],
+        width: int = 10,
+        source_metrics=None,
+        strip_ansi: bool = False,
+    ) -> str:
+        """Build a context bar string.
+
+        When strip_ansi=True (for use with prompt_toolkit FormattedTextControl
+        which applies its own class-based styling), ANSI colour codes are
+        omitted from the returned string so they are not rendered as literal
+        text.  When strip_ansi=False (backward-compatible plain-text path),
+        embedded ANSI codes are included.
+        """
         safe_percent = max(0, min(100, percent_used or 0))
         filled = round((safe_percent / 100) * width)
-        return f"[{('█' * filled) + ('░' * max(0, width - filled))}]"
+        empty = max(0, width - filled)
+
+        metric_entries = self._iter_metric_entries(source_metrics)
+        if not source_metrics or not metric_entries:
+            # No source breakdown: plain monochrome bar
+            return f"[{('█' * filled) + ('░' * empty)}]"
+
+        # Aggregate tokens per source
+        aggregated = {}
+        for key, rough_tokens, _char_count in metric_entries:
+            bucket = aggregated.setdefault(key, 0)
+            aggregated[key] = bucket + rough_tokens
+
+        total = source_metrics.total_estimated_tokens
+        if total <= 0:
+            return f"[{('█' * filled) + ('░' * empty)}]"
+
+        # When context percent rounds to 0 but we have source tokens, force at
+        # least one filled block so the bar is not all-empty while content exists.
+        if filled == 0 and total > 0:
+            filled = 1
+            empty = max(0, width - filled)
+
+        # Build per-source token→block mapping
+        source_blocks: list[tuple[str, int]] = []
+        for src, tokens in aggregated.items():
+            blocks = max(1, round((tokens / total) * filled))
+            source_blocks.append((src, min(blocks, filled - sum(b for _, b in source_blocks))))
+        # Last-resort fill for rounding errors
+        assigned = sum(b for _, b in source_blocks)
+        if assigned < filled:
+            source_blocks.append(("stable", filled - assigned))
+
+        # Build bar string (plain text when strip_ansi, coloured otherwise)
+        parts = ["["]
+        for src, blocks in source_blocks:
+            if strip_ansi:
+                parts.append('█' * blocks)
+            else:
+                color = self._BAR_ANSI.get(src, "")
+                reset = self._BAR_RESET
+                parts.append(f"{color}{'█' * blocks}{reset}")
+        if strip_ansi:
+            parts.append("░" * empty + "]")
+        else:
+            reset = self._BAR_RESET
+            parts.append("\033[90m" + "░" * empty + reset + "]")
+        return "".join(parts)
 
     def _get_status_bar_snapshot(self) -> Dict[str, Any]:
         model_name = self.model or "unknown"
@@ -1367,16 +1554,29 @@ class HermesCLI:
     def _status_bar_display_width(text: str) -> int:
         """Return terminal cell width for status-bar text.
 
-        len() is not enough for prompt_toolkit layout decisions because some
-        glyphs can render wider than one Python codepoint. Keeping the status
-        bar within the real display width prevents it from wrapping onto a
-        second line and leaving behind duplicate rows.
+        Strips two kinds of color codes before measuring so they are not
+        counted as display cells:
+          - prompt_toolkit markup: [colorname]...[/colorname]
+          - raw ANSI escapes:      \\033[...m  (e.g. \\033[36m)
         """
         try:
+            import re
             from prompt_toolkit.utils import get_cwidth
-            return get_cwidth(text or "")
         except Exception:
             return len(text or "")
+
+        # Strip raw ANSI escapes first: \033[K where K is any CSI sequence
+        # Covers SGR codes like \033[36m and \033[1;38;2;255;215;0m
+        text = re.sub(r'\x1b\[[0-9;]*m', '', text)
+        # Strip prompt_toolkit markup iteratively (nested tags)
+        # Be specific: only strip tags whose content starts with a letter
+        # (e.g. [green], [/bold]) so literal bar brackets like [██░░░░░░░░]
+        # are preserved as display characters.
+        prev = None
+        while prev != text:
+            prev = text
+            text = re.sub(r'\[/?[a-zA-Z][^\]]*\]', '', text)
+        return get_cwidth(text or "")
 
     @classmethod
     def _trim_status_bar_text(cls, text: str, max_width: int) -> str:
@@ -1487,28 +1687,190 @@ class HermesCLI:
                         context_label = "ctx --"
 
                     bar_style = self._status_bar_context_style(percent)
-                    frags = [
+                    source_metrics = self._get_preferred_breakdown_metrics()
+
+                    # Phase 2: build source-colored context bar + optional enriched label
+                    context_bar = self._build_context_bar(percent, source_metrics=source_metrics, strip_ansi=True)
+                    source_label = ""
+                    if self._show_context_breakdown and source_metrics:
+                        source_label = self._render_source_bar(source_metrics, width=30)
+                    if source_label:
+                        # Replace plain percent_label with enriched one: "25% (mem:80% id:15%)"
+                        enriched_label = f"{percent_label} ({source_label})"
+                        frags = [
+                            ("class:status-bar", " ⚕ "),
+                            ("class:status-bar-strong", snapshot["model_short"]),
+                            ("class:status-bar-dim", " │ "),
+                            ("class:status-bar-dim", context_label),
+                            ("class:status-bar-dim", " │ "),
+                            (bar_style, context_bar),
+                            ("class:status-bar-dim", " "),
+                            (bar_style, enriched_label),
+                            ("class:status-bar-dim", " │ "),
+                            ("class:status-bar-dim", duration_label),
+                            ("class:status-bar", " "),
+                        ]
+                    else:
+                        frags = [
+                            ("class:status-bar", " ⚕ "),
+                            ("class:status-bar-strong", snapshot["model_short"]),
+                            ("class:status-bar-dim", " │ "),
+                            ("class:status-bar-dim", context_label),
+                            ("class:status-bar-dim", " │ "),
+                            (bar_style, context_bar),
+                            ("class:status-bar-dim", " "),
+                            (bar_style, percent_label),
+                            ("class:status-bar-dim", " │ "),
+                            ("class:status-bar-dim", duration_label),
+                            ("class:status-bar", " "),
+                        ]
+
+            total_width = sum(self._status_bar_display_width(text) for _, text in frags)
+            if total_width > width:
+                # Strategy: first try dropping the source label if present
+                if source_label:
+                    frags_no_source = [
                         ("class:status-bar", " ⚕ "),
                         ("class:status-bar-strong", snapshot["model_short"]),
                         ("class:status-bar-dim", " │ "),
                         ("class:status-bar-dim", context_label),
                         ("class:status-bar-dim", " │ "),
-                        (bar_style, self._build_context_bar(percent)),
+                        (bar_style, context_bar),
                         ("class:status-bar-dim", " "),
                         (bar_style, percent_label),
                         ("class:status-bar-dim", " │ "),
                         ("class:status-bar-dim", duration_label),
                         ("class:status-bar", " "),
                     ]
-
-            total_width = sum(self._status_bar_display_width(text) for _, text in frags)
-            if total_width > width:
-                plain_text = "".join(text for _, text in frags)
-                trimmed = self._trim_status_bar_text(plain_text, width)
+                    if sum(self._status_bar_display_width(t) for _, t in frags_no_source) <= width:
+                        return frags_no_source
+                # Last resort: plain text, no ANSI codes in bar, just trimmed
+                plain_bar = self._build_context_bar(percent)
+                plain_parts = [
+                    " ⚕ ", snapshot["model_short"], " │ ",
+                    context_label, " │ ", plain_bar, " ",
+                    percent_label if not source_label else enriched_label,
+                    " │ ", duration_label,
+                ]
+                trimmed = self._trim_status_bar_text("".join(plain_parts), width)
                 return [("class:status-bar", trimmed)]
             return frags
         except Exception:
             return [("class:status-bar", f" {self._build_status_bar_text()} ")]
+
+    # -------------------------------------------------------------------------
+    # Source breakdown rendering (Phase 1: internal methods only)
+    # -------------------------------------------------------------------------
+
+    def _iter_metric_entries(self, metrics):
+        """Yield normalized metric entries from either request or context metrics."""
+        if not metrics:
+            return []
+        if hasattr(metrics, "by_bucket") and metrics.by_bucket:
+            return [
+                (entry.bucket, entry.rough_tokens, entry.char_count)
+                for entry in metrics.by_bucket
+            ]
+        if hasattr(metrics, "by_source") and metrics.by_source:
+            return [
+                (entry.source, entry.rough_tokens, entry.char_count)
+                for entry in metrics.by_source
+            ]
+        return []
+
+    def _render_context_breakdown(self, metrics) -> str:
+        """Render per-source token breakdown for debug/analysis display.
+
+        Returns empty string if metrics unavailable.
+        """
+        entries = self._iter_metric_entries(metrics)
+        if not entries:
+            return ""
+
+        aggregated = {}
+        for key, rough_tokens, char_count in entries:
+            bucket = aggregated.setdefault(key, {"rough_tokens": 0, "char_count": 0})
+            bucket["rough_tokens"] += rough_tokens
+            bucket["char_count"] += char_count
+
+        lines = []
+        for source, totals in aggregated.items():
+            color = _SOURCE_COLORS.get(source, "white")
+            label = _SOURCE_LABELS.get(source, source)
+            lines.append(
+                f"  [{color}]{label}[/{color}]: "
+                f"{totals['rough_tokens']:,} tok ({totals['char_count']:,} char)"
+            )
+
+        return "\n".join(lines)
+
+    def _get_current_context_metrics(self):
+        """Read cached ContextMetrics from the agent for display."""
+        agent = getattr(self, "agent", None)
+        if not agent:
+            return None
+        return getattr(agent, "_last_context_metrics", None)
+
+    def _get_current_request_metrics(self):
+        """Read cached RequestMetrics from the agent for display."""
+        agent = getattr(self, "agent", None)
+        if not agent:
+            return None
+        return getattr(agent, "_last_request_metrics", None)
+
+    def _get_preferred_breakdown_metrics(self):
+        """Prefer request-level breakdown, fallback to legacy context metrics."""
+        return self._get_current_request_metrics() or self._get_current_context_metrics()
+
+    def _render_source_bar(self, metrics, width: int = 20) -> str:
+        """Render a source proportion summary for status bar label.
+
+        Returns a compact label like "memory:80% identity:15% other:5%" or empty string.
+        Does NOT render colored bars — those come from _build_context_bar via CSS.
+        """
+        entries = self._iter_metric_entries(metrics)
+        if not entries:
+            return ""
+        if getattr(metrics, "total_estimated_tokens", 0) == 0:
+            return ""
+
+        aggregated = {}
+        for key, rough_tokens, _char_count in entries:
+            bucket = aggregated.setdefault(key, {"tokens": 0})
+            bucket["tokens"] += rough_tokens
+
+        segments = []
+        for source, totals in aggregated.items():
+            proportion = totals["tokens"] / metrics.total_estimated_tokens
+            segments.append(
+                {
+                    "source": _SOURCE_LABELS.get(source, source),
+                    "tokens": totals["tokens"],
+                    "proportion": proportion,
+                }
+            )
+
+        segments.sort(key=lambda x: x["proportion"], reverse=True)
+
+        # Top 3 + "other" if needed
+        primary = segments[:3]
+        small = segments[3:]
+        if small:
+            total_small = sum(s["proportion"] for s in small)
+            primary.append({
+                "source": "other",
+                "tokens": sum(s["tokens"] for s in small),
+                "proportion": total_small,
+            })
+
+        # Build compact label: "mem:80% id:15% sk:5%"
+        parts = []
+        for seg in primary:
+            pct = int(seg["proportion"] * 100)
+            if pct > 0:
+                parts.append(f"{seg['source']}:{pct}%")
+
+        return " ".join(parts)
 
     def _normalize_model_for_provider(self, resolved_provider: str) -> bool:
         """Normalize provider-specific model IDs and routing."""

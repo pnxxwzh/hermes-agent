@@ -97,6 +97,46 @@ _PREFIX_RE = re.compile(
     r"(?<![A-Za-z0-9_-])(" + "|".join(_PREFIX_PATTERNS) + r")(?![A-Za-z0-9_-])"
 )
 
+_FAST_REDACTION_HINTS = (
+    "sk-",
+    "ghp_",
+    "github_pat_",
+    "gho_",
+    "ghu_",
+    "ghs_",
+    "ghr_",
+    "xox",
+    "aiza",
+    "pplx-",
+    "fal_",
+    "fc-",
+    "bb_live_",
+    "gaaaa",
+    "akia",
+    "sk_live_",
+    "sk_test_",
+    "rk_live_",
+    "sg.",
+    "hf_",
+    "r8_",
+    "npm_",
+    "pypi-",
+    "dop_v1_",
+    "doo_v1_",
+    "am_",
+    "sk_",
+    "tvly-",
+    "exa_",
+    "bot",
+    "api_key",
+    "apikey",
+    "token",
+    "secret",
+    "password",
+    "authorization:",
+    "://",
+)
+
 
 def _mask_token(token: str) -> str:
     """Mask a token, preserving prefix for long tokens."""
@@ -118,6 +158,16 @@ def redact_sensitive_text(text: str) -> str:
     if not text:
         return text
     if not _REDACT_ENABLED:
+        return text
+
+    lowered = text.lower()
+    likely_telegram_token = ":" in text and any(ch.isdigit() for ch in text[:16])
+    likely_signal_phone = bool(_SIGNAL_PHONE_RE.search(text))
+    if (
+        not any(hint in lowered for hint in _FAST_REDACTION_HINTS)
+        and not likely_telegram_token
+        and not likely_signal_phone
+    ):
         return text
 
     # Known prefixes (sk-, ghp_, etc.)

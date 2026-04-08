@@ -1,5 +1,21 @@
 """Shared fixtures for the hermes-agent test suite."""
 
+# ── Missing optional dependency compat ─────────────────────────────────────────
+# Only mock truly optional third-party packages that may be absent in the test
+# environment.  Do NOT mock in-repo modules here: doing so pollutes sys.modules
+# for the entire suite and turns real packages (e.g. tools.registry,
+# tools.web_tools, tools.environments) into MagicMocks, which hides regressions
+# and causes broad false failures under xdist.
+import sys as _sys
+from unittest.mock import MagicMock
+_MOCKS = {
+    # Optional third-party dependencies
+    "fal_client", "litellm", "anthropic",
+}
+for _m in _MOCKS:
+    if _m not in _sys.modules:
+        _sys.modules[_m] = MagicMock()
+
 import asyncio
 import os
 import signal

@@ -1,29 +1,66 @@
-from agent.sparkgraph.formatter import format_recall_block
+"""Tests for SparkGraph recall block formatter."""
+import pytest
+from agent.sparkgraph.formatter import build_recall_payload
 
 
-def test_format_recall_block_includes_header_and_nodes():
-    block = format_recall_block(
-        [
-            {"type": "FACT", "summary": "socksio may be required for SOCKS proxy support"},
-            {"type": "PREFERENCE", "summary": "User prefers concise replies"},
-        ]
-    )
-    assert "[SparkGraph Recall]" in block
-    assert "[FACT]" in block
-    assert "[PREFERENCE]" in block
+def _node(node_id, summary, node_type="FACT", default_inject=1):
+    return {
+        "id": node_id,
+        "summary": summary,
+        "type": node_type,
+        "default_inject": default_inject,
+    }
 
 
-def test_format_recall_block_respects_char_budget():
-    block = format_recall_block(
-        [
-            {"type": "FACT", "summary": "A" * 200},
-            {"type": "FACT", "summary": "B" * 200},
-        ],
-        max_chars=180,
-    )
-    assert block.count("- [") == 0 or block.count("- [") == 1
+def test_default_inject_1_included():
+    nodes = [_node("n1", "remember to check pg_hba.conf", default_inject=1)]
+    block, ids = build_recall_payload(nodes)
+    assert "pg_hba.conf" in block
+    assert "n1" in ids
 
 
-def test_format_recall_block_returns_empty_when_no_valid_nodes():
-    block = format_recall_block([{"summary": "", "type": ""}])
+def test_default_inject_0_excluded():
+    """default_inject=0 nodes are suppressed from recall output."""
+    nodes = [
+        _node("n1", "active knowledge that should show", default_inject=1),
+        _node("n2", "reflection should not appear", default_inject=0),
+        _node("n3", "another active fact", default_inject=1),
+    ]
+    block, ids = build_recall_payload(nodes)
+    assert "reflection should not appear" not in block
+    assert "n2" not in ids
+    assert "active knowledge that should show" in block
+    assert "another active fact" in block
+    # Check n1 and n3 are present
+    assert len(ids) == 2
+    assert "n1" in ids
+    assert "n3" in ids
+
+
+def test_default_inject_missing_defaults_to_1():
+    """Nodes without default_inject field default to injectable."""
+    nodes = [
+        {"id": "n1", "summary": "no default_inject field", "type": "FACT"},
+        {"id": "n2", "summary": "has it explicitly", "type": "FACT", "default_inject": 0},
+    ]
+    block, ids = build_recall_payload(nodes)
+    assert "no default_inject field" in block
+    assert "has it explicitly" not in block
+    assert "n1" in ids
+    assert "n2" not in ids
+
+
+def test_empty_nodes_returns_empty():
+    block, ids = build_recall_payload([])
     assert block == ""
+    assert ids == []
+
+
+def test_edges_use_summary_labels_when_available():
+    nodes = [
+        _node("n1", "Redis bind config"),
+        _node("n2", "Docker daemon must be running", node_type="ISSUE"),
+    ]
+    edges = [{"from_id": "n1", "to_id": "n2", "type": "RELATED_TO"}]
+    block, _ = build_recall_payload(nodes, edges=edges)
+    assert "Redis bind config --[RELATED_TO]--> Docker daemon must be running" in block
