@@ -57,12 +57,22 @@ class SparkGraphStore:
     def close(self):
         self._conn.close()
 
+    @staticmethod
+    def _meta_with_source_sessions(
+        meta: dict[str, Any] | None,
+        sessions: list[str],
+    ) -> dict[str, Any]:
+        payload = dict(meta or {})
+        payload["source_sessions"] = list(sessions)
+        return payload
+
     def insert_node(self, item: SparkGraphNodeInput) -> str:
         now = int(time.time())
         node_id = uuid.uuid4().hex
         validated_count = item.meta.get("validated_count", 0) if item.meta else 0
         # source_sessions：优先从 meta 合并，写入独立列（同时回填 meta，保持一致）
         sessions_from_meta = item.meta.get("source_sessions", []) if item.meta else []
+        meta_payload = self._meta_with_source_sessions(item.meta, sessions_from_meta)
         source_sessions = json.dumps(sessions_from_meta)
         self._conn.execute(
             f"""
@@ -81,7 +91,7 @@ class SparkGraphStore:
                 item.confidence,
                 item.source_kind,
                 item.canonical_key,
-                json.dumps(item.meta or {}, sort_keys=True),
+                json.dumps(meta_payload, sort_keys=True),
                 source_sessions,
                 1 if item.default_inject else 0,
                 now,
@@ -157,9 +167,18 @@ class SparkGraphStore:
         sessions = json.loads(current.get("source_sessions") or "[]")
         if new_session_id and new_session_id not in sessions:
             sessions.append(new_session_id)
+        meta = self._meta_with_source_sessions(
+            json.loads(current.get("meta") or "{}"),
+            sessions,
+        )
         self._conn.execute(
-            f"UPDATE {NODES_TABLE} SET source_sessions = ?, updated_at = ? WHERE id = ?",
-            (json.dumps(sessions, sort_keys=True), int(time.time()), node_id),
+            f"UPDATE {NODES_TABLE} SET source_sessions = ?, meta = ?, updated_at = ? WHERE id = ?",
+            (
+                json.dumps(sessions, sort_keys=True),
+                json.dumps(meta, sort_keys=True),
+                int(time.time()),
+                node_id,
+            ),
         )
         self._conn.commit()
 
@@ -185,12 +204,22 @@ class SparkGraphStore:
         keep_sessions = set(json.loads(keep.get("source_sessions") or "[]"))
         merge_sessions = set(json.loads(merge.get("source_sessions") or "[]"))
         all_sessions = keep_sessions | merge_sessions
+        keep_meta = self._meta_with_source_sessions(
+            json.loads(keep.get("meta") or "{}"),
+            sorted(all_sessions),
+        )
 
         self._conn.execute(
             f"""UPDATE {NODES_TABLE}
-                SET validated_count = ?, source_sessions = ?, updated_at = ?
+                SET validated_count = ?, source_sessions = ?, meta = ?, updated_at = ?
                 WHERE id = ?""",
-            (merged_validated, json.dumps(list(all_sessions), sort_keys=True), now, keep_id),
+            (
+                merged_validated,
+                json.dumps(list(all_sessions), sort_keys=True),
+                json.dumps(keep_meta, sort_keys=True),
+                now,
+                keep_id,
+            ),
         )
 
         # 3. 迁移边（from_id/to_id 替换）——去重在迁移前先执行，防止 UNIQUE 约束冲突
@@ -204,6 +233,9 @@ class SparkGraphStore:
         # Case 3 — keep→merge:
         #   migrate keep→merge to keep→keep creates a self-loop,
         #   which violates CHECK (from_id <> to_id) → delete keep→merge
+        # Case 4 — merge→keep:
+        #   migrate merge→keep to keep→keep creates a self-loop,
+        #   which violates CHECK (from_id <> to_id) → delete merge→keep
         self._conn.execute(f"""
             DELETE FROM {EDGES_TABLE}
             WHERE (
@@ -218,7 +250,16 @@ class SparkGraphStore:
                 from_id = ?
                 AND to_id = ?
             )
-        """, (merge_id, keep_id, merge_id, keep_id, keep_id, merge_id))
+            OR (
+                from_id = ?
+                AND to_id = ?
+            )
+        """, (
+            merge_id, keep_id,
+            merge_id, keep_id,
+            keep_id, merge_id,
+            merge_id, keep_id,
+        ))
 
         # 迁移 from_id
         self._conn.execute(

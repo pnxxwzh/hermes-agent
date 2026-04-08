@@ -98,6 +98,30 @@ class TestContextMetrics:
         assert compressor.last_prompt_tokens == 100
         assert compressor.last_completion_tokens == 10
 
+    def test_context_metrics_merged_with_combines_counts_and_sources(self):
+        """T1.x: merged_with returns a new aggregate snapshot."""
+        left = ContextMetrics(
+            stable_tokens=100,
+            dynamic_tokens=0,
+            total_estimated_tokens=100,
+            by_source=[SourceMetrics("identity", "stable", 400, 100)],
+        )
+        right = ContextMetrics(
+            stable_tokens=0,
+            dynamic_tokens=20,
+            total_estimated_tokens=20,
+            by_source=[SourceMetrics("plugin", "dynamic", 80, 20)],
+        )
+
+        merged = left.merged_with(right)
+
+        assert merged.stable_tokens == 100
+        assert merged.dynamic_tokens == 20
+        assert merged.total_estimated_tokens == 120
+        assert [s.source for s in merged.by_source] == ["identity", "plugin"]
+        assert left.total_estimated_tokens == 100
+        assert right.total_estimated_tokens == 20
+
 
 class TestAssemblyResult:
     """T1: AssemblyResult creation and properties."""

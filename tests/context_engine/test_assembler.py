@@ -1,8 +1,10 @@
 """Tests for context_engine.assembler."""
 
+import logging
 import pytest
 from unittest.mock import MagicMock, patch
 
+from agent.context_engine import registry as registry_module
 from agent.context_engine.assembler import (
     ContextAssembler,
     STABLE_FACTORIES,
@@ -69,6 +71,22 @@ class TestAssemblerStable:
         assert len(result.stable_chunks) == 2
         sources = {c.source for c in result.stable_chunks}
         assert sources == {"ok", "also_ok"}
+
+    def test_assemble_stable_logs_factory_exception(self, caplog):
+        """T9.x: factory failures are logged with the source name."""
+        mock_agent = MagicMock()
+        caplog.set_level(logging.WARNING)
+        assembler = ContextAssembler(
+            mock_agent,
+            stable_factories=[
+                ("boom", lambda ctx: (_ for _ in ()).throw(RuntimeError("kaboom"))),
+            ],
+        )
+
+        result = assembler.assemble_stable()
+
+        assert result.stable_chunks == []
+        assert "Context source 'boom' failed during assembly" in caplog.text
 
     def test_assemble_stable_none_system_message(self):
         """T9.4: system_message=None does not crash."""
@@ -160,6 +178,35 @@ class TestAssemblerStable:
 
         assert result.stable_system.count("SOUL") == 1
         mock_context.assert_called_once_with(cwd="/workspace", skip_soul=True)
+
+    def test_assemble_stable_includes_registered_factories(self):
+        """T9.x: registry-based stable factories are appended to default assembly."""
+        mock_agent = MagicMock()
+        mock_agent.skip_context_files = True
+        mock_agent._honcho_config = None
+        mock_agent.valid_tool_names = []
+        mock_agent._tool_use_enforcement = None
+        mock_agent._honcho = None
+        mock_agent._memory_store = None
+        mock_agent._memory_enabled = False
+        mock_agent._user_profile_enabled = False
+        mock_agent._context_cwd = None
+        mock_agent.model = None
+        mock_agent.provider = None
+        mock_agent.session_id = None
+        mock_agent.platform = None
+        mock_agent.pass_session_id = False
+
+        @registry_module.register_stable("registered_stable")
+        def _registered(ctx):
+            return [_make_chunk("registered_stable", content="registered")]
+
+        try:
+            assembler = ContextAssembler(mock_agent)
+            result = assembler.assemble_stable()
+            assert any(c.source == "registered_stable" for c in result.stable_chunks)
+        finally:
+            registry_module.STABLE_SOURCE_FACTORIES.pop()
 
 
 class TestAssemblerDynamic:

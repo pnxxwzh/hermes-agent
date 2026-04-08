@@ -133,7 +133,7 @@ def embedding_runtime_health(
     probe_enabled: bool = True,
 ) -> RuntimeHealth:
     return _component_health(
-        enabled=True,
+        enabled=bool(getattr(getattr(config, "recall", None), "enabled", True)),
         provider=config.embedding.provider,
         model=config.embedding.model,
         base_url=config.embedding.base_url,

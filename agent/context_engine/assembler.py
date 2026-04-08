@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 from agent.context_engine.context import AssemblyContext
 from agent.context_engine.models import AssemblyResult, ContextChunk
+from agent.context_engine.registry import DYNAMIC_SOURCE_FACTORIES, STABLE_SOURCE_FACTORIES
 
 if TYPE_CHECKING:
     from agent.context_engine.sources import (
@@ -24,6 +26,9 @@ if TYPE_CHECKING:
         ToolUseEnforcementSource,
         UserProfileSource,
     )
+
+
+logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -209,8 +214,30 @@ class ContextAssembler:
         dynamic_factories: list = None,
     ):
         self._agent = agent
-        self._stable_factories = STABLE_FACTORIES if stable_factories is None else stable_factories
-        self._dynamic_factories = DYNAMIC_FACTORIES if dynamic_factories is None else dynamic_factories
+        self._stable_factories = (
+            self._merge_registered_factories(STABLE_FACTORIES, STABLE_SOURCE_FACTORIES)
+            if stable_factories is None
+            else stable_factories
+        )
+        self._dynamic_factories = (
+            self._merge_registered_factories(DYNAMIC_FACTORIES, DYNAMIC_SOURCE_FACTORIES)
+            if dynamic_factories is None
+            else dynamic_factories
+        )
+
+    @staticmethod
+    def _merge_registered_factories(
+        base_factories: list,
+        registered_factories: list,
+    ) -> list:
+        merged = list(base_factories)
+        known_names = {name for name, _ in base_factories}
+        for name, factory in registered_factories:
+            if name in known_names:
+                continue
+            merged.append((name, factory))
+            known_names.add(name)
+        return merged
 
     def _collect(
         self,
@@ -222,7 +249,12 @@ class ContextAssembler:
         for name, factory in factories:
             try:
                 result = factory(ctx)
-            except Exception:
+            except Exception as exc:
+                logger.warning(
+                    "Context source '%s' failed during assembly: %s",
+                    name,
+                    exc,
+                )
                 result = []
             if result:
                 chunks.extend(result)

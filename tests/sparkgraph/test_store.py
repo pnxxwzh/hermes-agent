@@ -23,6 +23,7 @@ def test_insert_node_round_trips(tmp_path):
     assert node is not None
     assert node["type"] == "FACT"
     assert node["canonical_key"] == "fact:socksio-proxy"
+    assert json.loads(node["meta"])["source_sessions"] == []
 
 
 def test_increment_validated_count(tmp_path):
@@ -218,6 +219,7 @@ def test_merge_nodes(tmp_path):
     assert keep["validated_count"] == 0  # neither had validated_count
     sessions = set(json.loads(keep["source_sessions"]))
     assert sessions == {"session-alpha", "session-beta"}
+    assert set(json.loads(keep["meta"])["source_sessions"]) == {"session-alpha", "session-beta"}
 
     # merge: deprecated
     merged = store.get_node(merge_id)
@@ -254,12 +256,14 @@ def test_merge_source_sessions(tmp_path):
     node = store.get_node(node_id)
     sessions = json.loads(node["source_sessions"])
     assert set(sessions) == {"session-alpha", "session-beta"}
+    assert set(json.loads(node["meta"])["source_sessions"]) == {"session-alpha", "session-beta"}
 
     # Duplicate merge is a no-op
     store.merge_source_sessions(node_id, "session-beta")
     node = store.get_node(node_id)
     sessions = json.loads(node["source_sessions"])
     assert sessions.count("session-beta") == 1  # no duplication
+    assert json.loads(node["meta"])["source_sessions"].count("session-beta") == 1
 
     # Merge on non-existent node is a no-op
     store.merge_source_sessions("nonexistent-id", "session-gamma")
@@ -311,6 +315,32 @@ def test_merge_nodes_accumulates_validated_count(tmp_path):
 
     keep = store.get_node(keep_id)
     assert keep["validated_count"] == 5, "validated_count should be 3+2=5"
+    assert json.loads(keep["meta"])["source_sessions"] == []
+
+
+def test_merge_nodes_removes_merge_to_keep_edge_before_migration(tmp_path):
+    """merge->keep would become keep->keep; merge should pre-delete it."""
+    store = SparkGraphStore(tmp_path / "sparkgraph" / "default.db")
+
+    keep_id = store.insert_node(SparkGraphNodeInput(
+        type=NodeType.FACT,
+        summary="keep",
+        canonical_key="fact:keep-self-loop-guard",
+        source_kind="flush",
+    ))
+    merge_id = store.insert_node(SparkGraphNodeInput(
+        type=NodeType.FACT,
+        summary="merge",
+        canonical_key="fact:merge-self-loop-guard",
+        source_kind="flush",
+    ))
+
+    store.insert_edge(from_id=merge_id, to_id=keep_id, edge_type=EdgeType.RELATED_TO)
+
+    store.merge_nodes(keep_id=keep_id, merge_id=merge_id)
+
+    rows = store.conn.execute("SELECT from_id, to_id FROM sg_edges").fetchall()
+    assert rows == []
 
 
 def test_search_nodes_uses_fts_sync(tmp_path):

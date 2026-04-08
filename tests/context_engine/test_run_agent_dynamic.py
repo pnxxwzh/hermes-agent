@@ -4,6 +4,8 @@ import pytest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from agent.context_engine.models import ContextMetrics, SourceMetrics
+
 
 class TestDynamicLayerIntegration:
     """T12: dynamic layer integration."""
@@ -49,7 +51,7 @@ class TestDynamicLayerIntegration:
             assert dynamic_result.effective_system == "dynamic content"
 
     def test_assemble_dynamic_syncs_metrics(self):
-        """T12.2: metrics synced to context_compressor."""
+        """T12.2: dynamic metrics merge into cached stable metrics."""
         from run_agent import AIAgent
         with patch("run_agent.OpenAI"), \
              patch("run_agent.get_tool_definitions", return_value=[]), \
@@ -65,7 +67,18 @@ class TestDynamicLayerIntegration:
         agent.context_compressor = compressor
         agent._cached_system_prompt = ""
 
-        mock_metrics = MagicMock()
+        stable_metrics = ContextMetrics(
+            stable_tokens=10,
+            dynamic_tokens=0,
+            total_estimated_tokens=10,
+            by_source=[SourceMetrics("identity", "stable", 40, 10)],
+        )
+        mock_metrics = ContextMetrics(
+            stable_tokens=0,
+            dynamic_tokens=3,
+            total_estimated_tokens=3,
+            by_source=[SourceMetrics("plugin", "dynamic", 12, 3)],
+        )
         mock_result = MagicMock(
             effective_system="dyn",
             dynamic_chunks=[],
@@ -76,12 +89,46 @@ class TestDynamicLayerIntegration:
         agent._context_assembler = mock_assembler
 
         with patch.object(agent, "_get_context_assembler", return_value=mock_assembler):
+            agent._stable_context_metrics = stable_metrics
             dynamic_result = agent._get_context_assembler().assemble_dynamic(
                 user_message="test",
                 conversation_history=[],
             )
-            dynamic_result.metrics.sync_to(agent.context_compressor)
-            mock_metrics.sync_to.assert_called_once_with(compressor)
+            agent._last_context_metrics = agent._stable_context_metrics.merged_with(
+                dynamic_result.metrics
+            )
+            assert agent._last_context_metrics.total_estimated_tokens == 13
+            assert [s.source for s in agent._last_context_metrics.by_source] == [
+                "identity",
+                "plugin",
+            ]
+
+    def test_prompt_token_estimate_uses_full_api_messages(self):
+        """T12.x: full request estimate replaces dynamic-only token overwrite."""
+        from run_agent import AIAgent
+        with patch("run_agent.OpenAI"), \
+             patch("run_agent.get_tool_definitions", return_value=[]), \
+             patch("run_agent.check_toolset_requirements", return_value={}):
+            agent = AIAgent(
+                api_key="test-key",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+
+        agent.context_compressor = MagicMock()
+        agent.context_compressor.last_prompt_tokens = 0
+        api_messages = [{"role": "system", "content": "stable\n\ndyn"}]
+
+        with patch("run_agent.estimate_request_tokens_rough", return_value=42) as mock_estimate:
+            agent.context_compressor.last_prompt_tokens = 3
+            agent.context_compressor.last_prompt_tokens = mock_estimate(
+                api_messages,
+                tools=agent.tools or None,
+            )
+
+        assert agent.context_compressor.last_prompt_tokens == 42
+        mock_estimate.assert_called_once_with(api_messages, tools=agent.tools or None)
 
     def test_assemble_dynamic_fallback_on_exception(self):
         """T12.3: assembler exception triggers fallback to original logic."""

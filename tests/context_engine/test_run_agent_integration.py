@@ -3,6 +3,8 @@
 import pytest
 from unittest.mock import MagicMock, patch
 
+from agent.context_engine.models import ContextMetrics, SourceMetrics
+
 
 class TestBuildSystemPromptIntegration:
     """T11: _build_system_prompt via ContextAssembler."""
@@ -182,3 +184,31 @@ class TestBuildSystemPromptIntegration:
         result = agent._build_system_prompt()
         assert "# Project Context" not in result
         assert "AGENTS.md" not in result
+
+    def test_build_system_prompt_caches_stable_context_metrics(self):
+        """T11.x: stable metrics are retained for later dynamic merges."""
+        from run_agent import AIAgent
+        with patch("run_agent.OpenAI"), \
+             patch("run_agent.get_tool_definitions", return_value=[]), \
+             patch("run_agent.check_toolset_requirements", return_value={}):
+            agent = AIAgent(
+                api_key="test-key",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+
+        stable_metrics = ContextMetrics(
+            stable_tokens=10,
+            dynamic_tokens=0,
+            total_estimated_tokens=10,
+            by_source=[SourceMetrics("identity", "stable", 40, 10)],
+        )
+        mock_result = MagicMock(stable_system="stable", metrics=stable_metrics)
+        mock_assembler = MagicMock()
+        mock_assembler.assemble_stable.return_value = mock_result
+        agent._context_assembler = mock_assembler
+
+        agent._build_system_prompt()
+
+        assert agent._stable_context_metrics is stable_metrics

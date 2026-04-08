@@ -82,6 +82,19 @@ class ContextMetrics:
     total_estimated_tokens: int
     by_source: list[SourceMetrics]
 
+    def merged_with(self, other: "ContextMetrics | None") -> "ContextMetrics":
+        """Combine two metric snapshots without mutating either input."""
+        if other is None:
+            return self
+        return ContextMetrics(
+            stable_tokens=self.stable_tokens + other.stable_tokens,
+            dynamic_tokens=self.dynamic_tokens + other.dynamic_tokens,
+            total_estimated_tokens=(
+                self.total_estimated_tokens + other.total_estimated_tokens
+            ),
+            by_source=[*self.by_source, *other.by_source],
+        )
+
     def sync_to(self, compressor) -> None:
         """Sync estimated tokens to a ContextCompressor instance.
 

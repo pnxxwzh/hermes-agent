@@ -1238,6 +1238,7 @@ class AIAgent:
         self.compression_enabled = compression_enabled
         self._context_assembler = None  # lazy init via _get_context_assembler()
         self._context_cwd = os.getenv("TERMINAL_CWD")  # for ProjectContextSource
+        self._stable_context_metrics = None  # cached stable-only ContextMetrics
         self._last_context_metrics = None  # cached ContextMetrics from last assembly
         self._user_turn_count = 0
 
@@ -2877,6 +2878,7 @@ class AIAgent:
         assembler = self._get_context_assembler()
         result = assembler.assemble_stable(system_message=system_message)
         result.metrics.sync_to(self.context_compressor)
+        self._stable_context_metrics = result.metrics
         self._last_context_metrics = result.metrics  # cache for CLI status bar
         self._cached_system_prompt = result.stable_system
         return self._cached_system_prompt
@@ -6821,8 +6823,13 @@ class AIAgent:
                     user_message=original_user_message,
                     conversation_history=messages,
                 )
-                dynamic_result.metrics.sync_to(self.context_compressor)
-                self._last_context_metrics = dynamic_result.metrics
+                stable_metrics = getattr(self, "_stable_context_metrics", None)
+                if stable_metrics is not None:
+                    self._last_context_metrics = stable_metrics.merged_with(
+                        dynamic_result.metrics
+                    )
+                else:
+                    self._last_context_metrics = dynamic_result.metrics
             except Exception:
                 dynamic_result = None
 
@@ -6871,6 +6878,11 @@ class AIAgent:
                 sys_offset = 1 if effective_system else 0
                 for idx, pfm in enumerate(self.prefill_messages):
                     api_messages.insert(sys_offset + idx, pfm.copy())
+
+            self.context_compressor.last_prompt_tokens = estimate_request_tokens_rough(
+                api_messages,
+                tools=self.tools or None,
+            )
 
             # Apply Anthropic prompt caching for Claude models via OpenRouter.
             # Auto-detected: if model name contains "claude" and base_url is OpenRouter,
