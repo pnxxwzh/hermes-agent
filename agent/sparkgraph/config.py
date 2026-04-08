@@ -11,7 +11,6 @@ from hermes_constants import get_hermes_home
 
 DEFAULT_SPARKGRAPH_CONFIG: Dict[str, Any] = {
     "mode": "flush_integrated",
-    "db_path": "",
     "recall": {
         "enabled": True,
         "max_items": 4,
@@ -155,8 +154,10 @@ def parse_sparkgraph_config(raw: Dict[str, Any] | None, hermes_home: Path | None
         ),
     )
 
+    # Legacy compatibility: old configs may still carry sparkgraph.db_path.
+    # New configs always use the profile-scoped default database path.
     db_path = resolve_sparkgraph_db_path(
-        _require_string(raw.get("db_path", DEFAULT_SPARKGRAPH_CONFIG["db_path"]), "db_path"),
+        _require_string(raw.get("db_path", ""), "db_path"),
         hermes_home=hermes_home,
     )
 

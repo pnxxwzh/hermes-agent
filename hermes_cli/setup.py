@@ -1420,16 +1420,9 @@ def setup_sparkgraph(config: dict):
     except ValueError:
         pass
 
-    # db_path
-    current_db_path = str(sg.get("db_path", "") or "")
-    db_path = prompt(
-        "Custom SparkGraph DB path (blank = profile default)",
-        current_db_path,
-    ).strip()
-    sg["db_path"] = db_path
-    if _is_external_sparkgraph_db_path(db_path):
-        print_warning("Custom SparkGraph DB path is outside the current profile scope.")
-        print_info("This works, but it deviates from the recommended Hermes profile layout.")
+    # SparkGraph storage is profile-scoped and fixed to the default location.
+    # Drop any legacy db_path override when the section is re-saved.
+    sg.pop("db_path", None)
 
     # Embedding runtime
     if not _configure_sparkgraph_embedding(config, sg):

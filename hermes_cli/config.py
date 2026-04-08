@@ -205,7 +205,6 @@ DEFAULT_CONFIG = {
     "toolsets": ["hermes-cli"],
     "sparkgraph": {
         "mode": "flush_integrated",
-        "db_path": "",
         "recall": {
             "enabled": True,
             "max_items": 4,
