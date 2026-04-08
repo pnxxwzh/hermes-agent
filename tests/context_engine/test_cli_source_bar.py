@@ -17,6 +17,14 @@ class TestSourceColorLabels:
             "sparkgraph_recall", "ephemeral", "plugin", "honcho_static",
             "honcho_turn", "tool_guidance", "tool_use_enforcement",
             "identity", "system_message", "time_platform",
+            "context_identity", "context_tool_guidance",
+            "context_tool_use_enforcement", "context_honcho_static",
+            "context_system_message", "context_memory", "context_user_profile",
+            "context_skills", "context_project", "context_time_platform",
+            "context_ephemeral", "context_plugin", "context_sparkgraph_recall",
+            "context_honcho_turn", "messages_user", "messages_assistant",
+            "messages_tool", "messages_other", "prefill_messages",
+            "tool_schemas",
         }
         assert set(_SOURCE_COLORS.keys()) == expected_sources
 
@@ -27,6 +35,14 @@ class TestSourceColorLabels:
             "sparkgraph_recall", "ephemeral", "plugin", "honcho_static",
             "honcho_turn", "tool_guidance", "tool_use_enforcement",
             "identity", "system_message", "time_platform",
+            "context_identity", "context_tool_guidance",
+            "context_tool_use_enforcement", "context_honcho_static",
+            "context_system_message", "context_memory", "context_user_profile",
+            "context_skills", "context_project", "context_time_platform",
+            "context_ephemeral", "context_plugin", "context_sparkgraph_recall",
+            "context_honcho_turn", "messages_user", "messages_assistant",
+            "messages_tool", "messages_other", "prefill_messages",
+            "tool_schemas",
         }
         assert set(_SOURCE_LABELS.keys()) == expected_sources
 
@@ -45,6 +61,23 @@ class MockContextMetrics:
 
     def __init__(self, by_source, total_estimated_tokens):
         self.by_source = by_source
+        self.total_estimated_tokens = total_estimated_tokens
+
+
+class MockRequestBucketMetrics:
+    """Minimal RequestBucketMetrics mock for testing."""
+
+    def __init__(self, bucket, rough_tokens, char_count):
+        self.bucket = bucket
+        self.rough_tokens = rough_tokens
+        self.char_count = char_count
+
+
+class MockRequestMetrics:
+    """Minimal RequestMetrics mock for testing."""
+
+    def __init__(self, by_bucket, total_estimated_tokens):
+        self.by_bucket = by_bucket
         self.total_estimated_tokens = total_estimated_tokens
 
 
@@ -190,6 +223,22 @@ class TestRenderSourceBar:
         assert result.count("memory:50%") == 1
         assert "identity:50%" in result
 
+    def test_render_source_bar_supports_request_buckets(self):
+        """T13.x: request metrics render via by_bucket."""
+        cli = self._make_cli()
+        metrics = MockRequestMetrics(
+            [
+                MockRequestBucketMetrics("messages_tool", 60, 240),
+                MockRequestBucketMetrics("context_project", 30, 120),
+                MockRequestBucketMetrics("tool_schemas", 10, 40),
+            ],
+            total_estimated_tokens=100,
+        )
+        result = cli._render_source_bar(metrics)
+        assert "msg:tool:60%" in result
+        assert "project:30%" in result
+        assert "tools:10%" in result
+
 
 class TestRenderContextBreakdown:
     """T13: _render_context_breakdown tests."""
@@ -252,6 +301,22 @@ class TestRenderContextBreakdown:
         assert "12" in result
         assert "48" in result
 
+    def test_render_context_breakdown_supports_request_metrics(self):
+        """T13.x: request buckets render in detailed breakdown."""
+        cli = self._make_cli()
+        metrics = MockRequestMetrics(
+            [
+                MockRequestBucketMetrics("messages_user", 8, 32),
+                MockRequestBucketMetrics("tool_schemas", 12, 48),
+            ],
+            total_estimated_tokens=20,
+        )
+        result = cli._render_context_breakdown(metrics)
+        assert "msg:user" in result
+        assert "tools" in result
+        assert "32" in result
+        assert "48" in result
+
 
 class TestPhase2Features:
     """Phase 2: enabled breakdown, adaptive width, context_metrics access."""
@@ -299,6 +364,50 @@ class TestPhase2Features:
         cli.agent = MagicMock()
         cli.agent._last_context_metrics = mock_metrics
         assert cli._get_current_context_metrics() is mock_metrics
+
+    def test_get_current_request_metrics_no_agent(self):
+        """T14.x: returns None when cli has no request-metrics agent."""
+        cli = self._make_cli()
+        cli.agent = None
+        assert cli._get_current_request_metrics() is None
+
+    def test_get_current_request_metrics_returns_metrics(self):
+        """T14.x: returns agent._last_request_metrics when available."""
+        from cli import HermesCLI
+        cli = object.__new__(HermesCLI)
+        cli._show_context_breakdown = True
+        mock_metrics = MockRequestMetrics(
+            [MockRequestBucketMetrics("messages_user", 8, 32)],
+            total_estimated_tokens=8,
+        )
+        cli.agent = MagicMock()
+        cli.agent._last_request_metrics = mock_metrics
+        assert cli._get_current_request_metrics() is mock_metrics
+
+    def test_get_preferred_breakdown_metrics_prefers_request_metrics(self):
+        """T14.x: preferred breakdown uses request metrics first."""
+        cli = self._make_cli()
+        cli.agent = MagicMock()
+        cli.agent._last_request_metrics = MockRequestMetrics(
+            [MockRequestBucketMetrics("messages_user", 8, 32)],
+            total_estimated_tokens=8,
+        )
+        cli.agent._last_context_metrics = MockContextMetrics(
+            [MockSourceMetrics("memory", 5, 20)],
+            total_estimated_tokens=5,
+        )
+        assert cli._get_preferred_breakdown_metrics() is cli.agent._last_request_metrics
+
+    def test_get_preferred_breakdown_metrics_falls_back_to_context_metrics(self):
+        """T14.x: preferred breakdown falls back to context metrics."""
+        cli = self._make_cli()
+        cli.agent = MagicMock()
+        cli.agent._last_request_metrics = None
+        cli.agent._last_context_metrics = MockContextMetrics(
+            [MockSourceMetrics("memory", 5, 20)],
+            total_estimated_tokens=5,
+        )
+        assert cli._get_preferred_breakdown_metrics() is cli.agent._last_context_metrics
 
     def test_render_source_bar_width_affects_output(self):
         """T14.5: width param is accepted without error (used for future bar rendering)."""

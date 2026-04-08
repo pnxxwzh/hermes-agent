@@ -48,6 +48,26 @@ _SOURCE_COLORS = {
     "identity": "bright_blue",
     "system_message": "bright_green",
     "time_platform": "bright_black",
+    "context_identity": "bright_blue",
+    "context_tool_guidance": "bright_cyan",
+    "context_tool_use_enforcement": "bright_cyan",
+    "context_honcho_static": "magenta",
+    "context_system_message": "bright_green",
+    "context_memory": "green",
+    "context_user_profile": "blue",
+    "context_skills": "yellow",
+    "context_project": "orange",
+    "context_time_platform": "bright_black",
+    "context_ephemeral": "bright_black",
+    "context_plugin": "gray",
+    "context_sparkgraph_recall": "purple",
+    "context_honcho_turn": "magenta",
+    "messages_user": "bright_blue",
+    "messages_assistant": "bright_green",
+    "messages_tool": "bright_magenta",
+    "messages_other": "white",
+    "prefill_messages": "cyan",
+    "tool_schemas": "bright_yellow",
 }
 _SOURCE_LABELS = {
     "stable": "stable",
@@ -65,6 +85,26 @@ _SOURCE_LABELS = {
     "identity": "identity",
     "system_message": "system",
     "time_platform": "time",
+    "context_identity": "identity",
+    "context_tool_guidance": "tool_guidance",
+    "context_tool_use_enforcement": "tool_enforce",
+    "context_honcho_static": "honcho",
+    "context_system_message": "system",
+    "context_memory": "memory",
+    "context_user_profile": "user",
+    "context_skills": "skills",
+    "context_project": "project",
+    "context_time_platform": "time",
+    "context_ephemeral": "ephemeral",
+    "context_plugin": "plugin",
+    "context_sparkgraph_recall": "SG",
+    "context_honcho_turn": "honcho_turn",
+    "messages_user": "msg:user",
+    "messages_assistant": "msg:asst",
+    "messages_tool": "msg:tool",
+    "messages_other": "msg:other",
+    "prefill_messages": "prefill",
+    "tool_schemas": "tools",
 }
 
 logger = logging.getLogger(__name__)
@@ -1363,6 +1403,26 @@ class HermesCLI:
         "identity": "\033[94m",       # bright_blue
         "system_message": "\033[92m",  # bright_green
         "time_platform": "\033[90m",  # bright_black
+        "context_identity": "\033[94m",
+        "context_tool_guidance": "\033[96m",
+        "context_tool_use_enforcement": "\033[96m",
+        "context_honcho_static": "\033[95m",
+        "context_system_message": "\033[92m",
+        "context_memory": "\033[32m",
+        "context_user_profile": "\033[34m",
+        "context_skills": "\033[33m",
+        "context_project": "\033[38;5;208m",
+        "context_time_platform": "\033[90m",
+        "context_ephemeral": "\033[90m",
+        "context_plugin": "\033[90m",
+        "context_sparkgraph_recall": "\033[35m",
+        "context_honcho_turn": "\033[95m",
+        "messages_user": "\033[94m",
+        "messages_assistant": "\033[92m",
+        "messages_tool": "\033[95m",
+        "messages_other": "\033[37m",
+        "prefill_messages": "\033[36m",
+        "tool_schemas": "\033[93m",
     }
     _BAR_RESET = "\033[0m"
 
@@ -1385,15 +1445,16 @@ class HermesCLI:
         filled = round((safe_percent / 100) * width)
         empty = max(0, width - filled)
 
-        if not source_metrics or not source_metrics.by_source:
+        metric_entries = self._iter_metric_entries(source_metrics)
+        if not source_metrics or not metric_entries:
             # No source breakdown: plain monochrome bar
             return f"[{('█' * filled) + ('░' * empty)}]"
 
         # Aggregate tokens per source
         aggregated = {}
-        for sm in source_metrics.by_source:
-            bucket = aggregated.setdefault(sm.source, 0)
-            aggregated[sm.source] = bucket + sm.rough_tokens
+        for key, rough_tokens, _char_count in metric_entries:
+            bucket = aggregated.setdefault(key, 0)
+            aggregated[key] = bucket + rough_tokens
 
         total = source_metrics.total_estimated_tokens
         if total <= 0:
@@ -1620,7 +1681,7 @@ class HermesCLI:
                         context_label = "ctx --"
 
                     bar_style = self._status_bar_context_style(percent)
-                    source_metrics = self._get_current_context_metrics()
+                    source_metrics = self._get_preferred_breakdown_metrics()
 
                     # Phase 2: build source-colored context bar + optional enriched label
                     context_bar = self._build_context_bar(percent, source_metrics=source_metrics, strip_ansi=True)
@@ -1695,19 +1756,36 @@ class HermesCLI:
     # Source breakdown rendering (Phase 1: internal methods only)
     # -------------------------------------------------------------------------
 
+    def _iter_metric_entries(self, metrics):
+        """Yield normalized metric entries from either request or context metrics."""
+        if not metrics:
+            return []
+        if hasattr(metrics, "by_bucket") and metrics.by_bucket:
+            return [
+                (entry.bucket, entry.rough_tokens, entry.char_count)
+                for entry in metrics.by_bucket
+            ]
+        if hasattr(metrics, "by_source") and metrics.by_source:
+            return [
+                (entry.source, entry.rough_tokens, entry.char_count)
+                for entry in metrics.by_source
+            ]
+        return []
+
     def _render_context_breakdown(self, metrics) -> str:
         """Render per-source token breakdown for debug/analysis display.
 
         Returns empty string if metrics unavailable.
         """
-        if not metrics or not hasattr(metrics, "by_source") or not metrics.by_source:
+        entries = self._iter_metric_entries(metrics)
+        if not entries:
             return ""
 
         aggregated = {}
-        for sm in metrics.by_source:
-            bucket = aggregated.setdefault(sm.source, {"rough_tokens": 0, "char_count": 0})
-            bucket["rough_tokens"] += sm.rough_tokens
-            bucket["char_count"] += sm.char_count
+        for key, rough_tokens, char_count in entries:
+            bucket = aggregated.setdefault(key, {"rough_tokens": 0, "char_count": 0})
+            bucket["rough_tokens"] += rough_tokens
+            bucket["char_count"] += char_count
 
         lines = []
         for source, totals in aggregated.items():
@@ -1727,21 +1805,33 @@ class HermesCLI:
             return None
         return getattr(agent, "_last_context_metrics", None)
 
+    def _get_current_request_metrics(self):
+        """Read cached RequestMetrics from the agent for display."""
+        agent = getattr(self, "agent", None)
+        if not agent:
+            return None
+        return getattr(agent, "_last_request_metrics", None)
+
+    def _get_preferred_breakdown_metrics(self):
+        """Prefer request-level breakdown, fallback to legacy context metrics."""
+        return self._get_current_request_metrics() or self._get_current_context_metrics()
+
     def _render_source_bar(self, metrics, width: int = 20) -> str:
         """Render a source proportion summary for status bar label.
 
         Returns a compact label like "memory:80% identity:15% other:5%" or empty string.
         Does NOT render colored bars — those come from _build_context_bar via CSS.
         """
-        if not metrics or not hasattr(metrics, "by_source"):
+        entries = self._iter_metric_entries(metrics)
+        if not entries:
             return ""
-        if not metrics.by_source or metrics.total_estimated_tokens == 0:
+        if getattr(metrics, "total_estimated_tokens", 0) == 0:
             return ""
 
         aggregated = {}
-        for sm in metrics.by_source:
-            bucket = aggregated.setdefault(sm.source, {"tokens": 0})
-            bucket["tokens"] += sm.rough_tokens
+        for key, rough_tokens, _char_count in entries:
+            bucket = aggregated.setdefault(key, {"tokens": 0})
+            bucket["tokens"] += rough_tokens
 
         segments = []
         for source, totals in aggregated.items():

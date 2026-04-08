@@ -22,6 +22,8 @@ class TestAssemblyContext:
         ctx = AssemblyContext(agent=None)
         assert ctx.conversation_history == []
         assert isinstance(ctx.conversation_history, list)
+        assert ctx.prefill_messages == []
+        assert ctx.tool_schemas == []
 
     def test_assembly_context_all_fields_set(self):
         """T2.x: all fields can be set."""
@@ -31,9 +33,13 @@ class TestAssemblyContext:
             user_message="hello",
             cwd="/tmp",
             conversation_history=[{"role": "user", "content": "hi"}],
+            prefill_messages=[{"role": "assistant", "content": "prefill"}],
+            tool_schemas=[{"name": "shell"}],
         )
         assert ctx.agent == "fake_agent"
         assert ctx.system_message == "sys"
         assert ctx.user_message == "hello"
         assert ctx.cwd == "/tmp"
         assert len(ctx.conversation_history) == 1
+        assert len(ctx.prefill_messages) == 1
+        assert len(ctx.tool_schemas) == 1

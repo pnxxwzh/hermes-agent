@@ -1176,6 +1176,30 @@ class AIAgent:
         if not isinstance(_agent_section, dict):
             _agent_section = {}
         self._tool_use_enforcement = _agent_section.get("tool_use_enforcement", "auto")
+        _context_engine_section = _agent_section.get("context_engine", {})
+        if not isinstance(_context_engine_section, dict):
+            _context_engine_section = {}
+
+        def _as_bool(value, default):
+            if value is None:
+                return default
+            if isinstance(value, bool):
+                return value
+            return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+        self._unified_input_engine = _as_bool(
+            _context_engine_section.get("unified_input_engine"),
+            False,
+        )
+        self._unified_input_shadow_compare = _as_bool(
+            _context_engine_section.get("unified_input_shadow_compare"),
+            True,
+        )
+        self._unified_input_compare_fail_fast = _as_bool(
+            _context_engine_section.get("unified_input_compare_fail_fast"),
+            False,
+        )
+        self._last_unified_input_compare_diff = None
 
         # Initialize context compressor for automatic context management
         # Compresses conversation when approaching model's context limit
@@ -1237,9 +1261,12 @@ class AIAgent:
         )
         self.compression_enabled = compression_enabled
         self._context_assembler = None  # lazy init via _get_context_assembler()
+        self._transport_adapter = None  # lazy init via _get_transport_adapter()
         self._context_cwd = os.getenv("TERMINAL_CWD")  # for ProjectContextSource
+        self._stable_context_chunks = []  # cached stable ContextChunk list
         self._stable_context_metrics = None  # cached stable-only ContextMetrics
         self._last_context_metrics = None  # cached ContextMetrics from last assembly
+        self._last_request_metrics = None  # cached RequestMetrics from last request build
         self._user_turn_count = 0
 
         # Cumulative token usage for the session
@@ -1296,6 +1323,7 @@ class AIAgent:
         
         # Turn counter (added after reset_session_state was first written — #2635)
         self._user_turn_count = 0
+        self._last_request_metrics = None
 
         # Context compressor internal counters (if present)
         if hasattr(self, "context_compressor") and self.context_compressor:
@@ -2878,17 +2906,152 @@ class AIAgent:
         assembler = self._get_context_assembler()
         result = assembler.assemble_stable(system_message=system_message)
         result.metrics.sync_to(self.context_compressor)
+        self._stable_context_chunks = list(result.stable_chunks)
         self._stable_context_metrics = result.metrics
         self._last_context_metrics = result.metrics  # cache for CLI status bar
         self._cached_system_prompt = result.stable_system
         return self._cached_system_prompt
 
+    def _attach_metrics_to_result(self, result: dict[str, Any]) -> dict[str, Any]:
+        """Attach the latest context/request metric snapshots to a result payload."""
+        result["context_metrics"] = getattr(self, "_last_context_metrics", None)
+        result["request_metrics"] = getattr(self, "_last_request_metrics", None)
+        return result
+
     def _get_context_assembler(self):
         """Lazily create ContextAssembler on first use."""
         if self._context_assembler is None:
             from agent.context_engine import ContextAssembler
-            self._context_assembler = ContextAssembler(agent=self)
+            from agent.context_engine.assembler import DYNAMIC_FACTORIES
+
+            dynamic_factories = [
+                (name, factory)
+                for name, factory in DYNAMIC_FACTORIES
+                if name != "honcho_turn"
+            ]
+            self._context_assembler = ContextAssembler(
+                agent=self,
+                dynamic_factories=dynamic_factories,
+            )
         return self._context_assembler
+
+    def _get_transport_adapter(self):
+        """Lazily create the transport adapter for the active API mode."""
+        if (
+            self._transport_adapter is None
+            or getattr(self._transport_adapter, "api_mode", None) != self.api_mode
+        ):
+            from agent.context_engine import get_transport_adapter
+
+            self._transport_adapter = get_transport_adapter(self.api_mode)
+        return self._transport_adapter
+
+    def _assemble_input_graph(
+        self,
+        *,
+        effective_system: str,
+        user_message: str | None,
+        conversation_history: list[dict[str, Any]] | None,
+        prefill_messages: list[dict[str, Any]] | None,
+        tool_schemas: list[dict[str, Any]] | None,
+        dynamic_chunks: list | None,
+    ):
+        """Assemble the unified semantic input graph for shadow comparison."""
+        from agent.context_engine import InputAssembly, InputNode
+
+        assembler = self._get_context_assembler()
+        request_only = assembler.assemble(
+            user_message=user_message,
+            conversation_history=conversation_history,
+            prefill_messages=prefill_messages,
+            tool_schemas=tool_schemas,
+            _include_stable=False,
+            _include_dynamic=False,
+            _include_request=True,
+        )
+        stable_nodes = [
+            InputNode.from_context_chunk(chunk)
+            for chunk in list(getattr(self, "_stable_context_chunks", []) or [])
+        ]
+        dynamic_nodes = [
+            InputNode.from_context_chunk(chunk)
+            for chunk in list(dynamic_chunks or [])
+        ]
+        return InputAssembly(
+            stable_nodes=stable_nodes,
+            dynamic_nodes=dynamic_nodes,
+            request_nodes=list(request_only.request_nodes),
+            effective_system=effective_system or "",
+            normalized_messages=list(request_only.normalized_messages),
+            prefill_messages=list(request_only.prefill_messages),
+            tool_schemas=list(request_only.tool_schemas),
+        )
+
+    def _build_transport_payload(
+        self,
+        assembly,
+        *,
+        current_turn_user_idx: int | None = None,
+        honcho_turn_context: str = "",
+        codex_preflight: bool = True,
+    ):
+        """Build a transport payload from a unified InputAssembly."""
+        import copy as _copy
+
+        payload = self._get_transport_adapter().build_payload(
+            assembly,
+            self,
+            current_turn_user_idx=current_turn_user_idx,
+            honcho_turn_context=honcho_turn_context,
+        )
+        if self.api_mode == "codex_responses" and codex_preflight:
+            payload.api_kwargs = self._preflight_codex_api_kwargs(
+                _copy.deepcopy(payload.api_kwargs),
+                allow_stream=False,
+            )
+        return payload
+
+    def _compare_engine_and_legacy_payload(
+        self,
+        *,
+        legacy_api_messages: list[dict[str, Any]],
+        legacy_api_kwargs: dict[str, Any],
+        engine_payload,
+    ) -> str | None:
+        """Return a first-difference summary between legacy and engine payloads."""
+
+        def _compare(path: str, left, right) -> str | None:
+            if type(left) is not type(right):
+                return f"{path}: type {type(left).__name__} != {type(right).__name__}"
+
+            if isinstance(left, dict):
+                left_keys = list(left.keys())
+                right_keys = list(right.keys())
+                if left_keys != right_keys:
+                    return f"{path}: keys {left_keys} != {right_keys}"
+                for key in left_keys:
+                    diff = _compare(f"{path}.{key}", left[key], right[key])
+                    if diff:
+                        return diff
+                return None
+
+            if isinstance(left, list):
+                if len(left) != len(right):
+                    return f"{path}: len {len(left)} != {len(right)}"
+                for idx, (l_item, r_item) in enumerate(zip(left, right)):
+                    diff = _compare(f"{path}[{idx}]", l_item, r_item)
+                    if diff:
+                        return diff
+                return None
+
+            if left != right:
+                return f"{path}: {left!r} != {right!r}"
+            return None
+
+        diff = _compare("api_messages", legacy_api_messages, engine_payload.api_messages)
+        if diff:
+            return diff
+        return _compare("api_kwargs", legacy_api_kwargs, engine_payload.api_kwargs)
 
     # =========================================================================
     # Pre/post-call guardrails (inspired by PR #1321 — @alireza78a)
@@ -6880,11 +7043,6 @@ class AIAgent:
                 for idx, pfm in enumerate(self.prefill_messages):
                     api_messages.insert(sys_offset + idx, pfm.copy())
 
-            self.context_compressor.last_prompt_tokens = estimate_request_tokens_rough(
-                api_messages,
-                tools=self.tools or None,
-            )
-
             # Apply Anthropic prompt caching for Claude models via OpenRouter.
             # Auto-detected: if model name contains "claude" and base_url is OpenRouter,
             # inject cache_control breakpoints (system + last 3 messages) to reduce
@@ -6897,6 +7055,107 @@ class AIAgent:
             # gated on context_compressor — so orphans from session loading or
             # manual message manipulation are always caught.
             api_messages = self._sanitize_api_messages(api_messages)
+
+            input_assembly = None
+            engine_payload = None
+            self._last_unified_input_compare_diff = None
+
+            try:
+                input_assembly = self._assemble_input_graph(
+                    effective_system=effective_system,
+                    user_message=original_user_message,
+                    conversation_history=messages,
+                    prefill_messages=self.prefill_messages,
+                    tool_schemas=self.tools or [],
+                    dynamic_chunks=(dynamic_result.dynamic_chunks if dynamic_result else []),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Unified input assembly failed; continuing with current request flow: %s",
+                    exc,
+                )
+                input_assembly = None
+
+            if input_assembly is not None:
+                try:
+                    self._last_request_metrics = input_assembly.request_metrics
+                except Exception as exc:
+                    logger.warning(
+                        "Unified input request metrics failed; continuing without request breakdown: %s",
+                        exc,
+                    )
+                    self._last_request_metrics = None
+            else:
+                self._last_request_metrics = None
+
+            if self._unified_input_engine:
+                try:
+                    if input_assembly is None:
+                        raise RuntimeError("input assembly unavailable")
+                    engine_payload = self._build_transport_payload(
+                        input_assembly,
+                        current_turn_user_idx=current_turn_user_idx,
+                        honcho_turn_context=self._honcho_turn_context,
+                        codex_preflight=False,
+                    )
+                    api_messages = engine_payload.api_messages
+                    self._last_context_metrics = input_assembly.context_metrics
+                except Exception as exc:
+                    logger.warning(
+                        "Unified input engine failed; falling back to legacy request assembly: %s",
+                        exc,
+                    )
+                    input_assembly = None
+                    engine_payload = None
+
+            if not self._unified_input_engine or input_assembly is None:
+                if self._unified_input_shadow_compare and not self._unified_input_engine:
+                    try:
+                        import copy as _copy
+
+                        if input_assembly is None:
+                            raise RuntimeError("input assembly unavailable")
+                        legacy_compare_kwargs = self._build_api_kwargs(_copy.deepcopy(api_messages))
+                        if self.api_mode == "codex_responses":
+                            legacy_compare_kwargs = self._preflight_codex_api_kwargs(
+                                _copy.deepcopy(legacy_compare_kwargs),
+                                allow_stream=False,
+                            )
+                        engine_payload = self._build_transport_payload(
+                            input_assembly,
+                            current_turn_user_idx=current_turn_user_idx,
+                            honcho_turn_context=self._honcho_turn_context,
+                            codex_preflight=True,
+                        )
+                        compare_diff = self._compare_engine_and_legacy_payload(
+                            legacy_api_messages=api_messages,
+                            legacy_api_kwargs=legacy_compare_kwargs,
+                            engine_payload=engine_payload,
+                        )
+                        self._last_unified_input_compare_diff = compare_diff
+                        if compare_diff:
+                            logger.warning(
+                                "Unified input shadow compare mismatch; continuing with legacy payload. diff=%s",
+                                compare_diff,
+                            )
+                            if self._unified_input_compare_fail_fast:
+                                raise RuntimeError(
+                                    f"Unified input shadow compare mismatch: {compare_diff}"
+                                )
+                    except Exception as exc:
+                        if self._unified_input_compare_fail_fast and (
+                            "Unified input shadow compare mismatch" in str(exc)
+                        ):
+                            raise
+                        logger.warning(
+                            "Unified input shadow compare failed; continuing with legacy payload: %s",
+                            exc,
+                        )
+
+            self.context_compressor.last_prompt_tokens = estimate_request_tokens_rough(
+                api_messages,
+                tools=self.tools or None,
+            )
 
             # Calculate approximate request size for logging
             total_chars = sum(len(str(msg)) for msg in api_messages)
@@ -6946,7 +7205,17 @@ class AIAgent:
 
             while retry_count < max_retries:
                 try:
-                    api_kwargs = self._build_api_kwargs(api_messages)
+                    if self._unified_input_engine and input_assembly is not None:
+                        engine_payload = self._build_transport_payload(
+                            input_assembly,
+                            current_turn_user_idx=current_turn_user_idx,
+                            honcho_turn_context=self._honcho_turn_context,
+                            codex_preflight=False,
+                        )
+                        api_kwargs = engine_payload.api_kwargs
+                    else:
+                        api_kwargs = self._build_api_kwargs(api_messages)
+
                     if self.api_mode == "codex_responses":
                         api_kwargs = self._preflight_codex_api_kwargs(api_kwargs, allow_stream=False)
 
@@ -7100,13 +7369,13 @@ class AIAgent:
                             self._emit_status(f"❌ Max retries ({max_retries}) exceeded for invalid responses. Giving up.")
                             logging.error(f"{self.log_prefix}Invalid API response after {max_retries} retries.")
                             self._persist_session(messages, conversation_history)
-                            return {
+                            return self._attach_metrics_to_result({
                                 "messages": messages,
                                 "completed": False,
                                 "api_calls": api_call_count,
                                 "error": "Invalid API response shape. Likely rate limited or malformed provider response.",
                                 "failed": True  # Mark as failure for filtering
-                            }
+                            })
                         
                         # Longer backoff for rate limiting (likely cause of None choices)
                         wait_time = min(5 * (2 ** (retry_count - 1)), 120)  # 5s, 10s, 20s, 40s, 80s, 120s
@@ -7120,13 +7389,13 @@ class AIAgent:
                                 self._vprint(f"{self.log_prefix}⚡ Interrupt detected during retry wait, aborting.", force=True)
                                 self._persist_session(messages, conversation_history)
                                 self.clear_interrupt()
-                                return {
+                                return self._attach_metrics_to_result({
                                     "final_response": f"Operation interrupted: retrying API call after rate limit (retry {retry_count}/{max_retries}).",
                                     "messages": messages,
                                     "api_calls": api_call_count,
                                     "completed": False,
                                     "interrupted": True,
-                                }
+                                })
                             time.sleep(0.2)
                         continue  # Retry the API call
 
@@ -7199,14 +7468,14 @@ class AIAgent:
                             )
                             self._cleanup_task_resources(effective_task_id)
                             self._persist_session(messages, conversation_history)
-                            return {
+                            return self._attach_metrics_to_result({
                                 "final_response": _exhaust_response,
                                 "messages": messages,
                                 "api_calls": api_call_count,
                                 "completed": False,
                                 "partial": True,
                                 "error": _exhaust_error,
-                            }
+                            })
 
                         if self.api_mode == "chat_completions":
                             assistant_message = response.choices[0].message
@@ -7239,14 +7508,14 @@ class AIAgent:
                                 partial_response = self._strip_think_blocks(truncated_response_prefix).strip()
                                 self._cleanup_task_resources(effective_task_id)
                                 self._persist_session(messages, conversation_history)
-                                return {
+                                return self._attach_metrics_to_result({
                                     "final_response": partial_response or None,
                                     "messages": messages,
                                     "api_calls": api_call_count,
                                     "completed": False,
                                     "partial": True,
                                     "error": "Response remained truncated after 3 continuation attempts",
-                                }
+                                })
 
                         # If we have prior messages, roll back to last complete state
                         if len(messages) > 1:
@@ -7256,26 +7525,26 @@ class AIAgent:
                             self._cleanup_task_resources(effective_task_id)
                             self._persist_session(messages, conversation_history)
 
-                            return {
+                            return self._attach_metrics_to_result({
                                 "final_response": None,
                                 "messages": rolled_back_messages,
                                 "api_calls": api_call_count,
                                 "completed": False,
                                 "partial": True,
                                 "error": "Response truncated due to output length limit"
-                            }
+                            })
                         else:
                             # First message was truncated - mark as failed
                             self._vprint(f"{self.log_prefix}❌ First response truncated - cannot recover", force=True)
                             self._persist_session(messages, conversation_history)
-                            return {
+                            return self._attach_metrics_to_result({
                                 "final_response": None,
                                 "messages": messages,
                                 "api_calls": api_call_count,
                                 "completed": False,
                                 "failed": True,
                                 "error": "First response truncated due to output length limit"
-                            }
+                            })
                     
                     # Track actual token usage from response for context management
                     if hasattr(response, 'usage') and response.usage:
@@ -7504,13 +7773,13 @@ class AIAgent:
                         self._vprint(f"{self.log_prefix}⚡ Interrupt detected during error handling, aborting retries.", force=True)
                         self._persist_session(messages, conversation_history)
                         self.clear_interrupt()
-                        return {
+                        return self._attach_metrics_to_result({
                             "final_response": f"Operation interrupted: handling API error ({error_type}: {self._clean_error_message(str(api_error))}).",
                             "messages": messages,
                             "api_calls": api_call_count,
                             "completed": False,
                             "interrupted": True,
-                        }
+                        })
                     
                     # Check for 413 payload-too-large BEFORE generic 4xx handler.
                     # A 413 is a payload-size error — the correct response is to
@@ -7556,13 +7825,13 @@ class AIAgent:
                             self._vprint(f"{self.log_prefix}   💡 Try /new to start a fresh conversation, or /compress to retry compression.", force=True)
                             logging.error(f"{self.log_prefix}413 compression failed after {max_compression_attempts} attempts.")
                             self._persist_session(messages, conversation_history)
-                            return {
+                            return self._attach_metrics_to_result({
                                 "messages": messages,
                                 "completed": False,
                                 "api_calls": api_call_count,
                                 "error": f"Request payload too large: max compression attempts ({max_compression_attempts}) reached.",
                                 "partial": True
-                            }
+                            })
                         self._emit_status(f"⚠️  Request payload too large (413) — compression attempt {compression_attempts}/{max_compression_attempts}...")
 
                         original_len = len(messages)
@@ -7581,13 +7850,13 @@ class AIAgent:
                             self._vprint(f"{self.log_prefix}   💡 Try /new to start a fresh conversation, or /compress to retry compression.", force=True)
                             logging.error(f"{self.log_prefix}413 payload too large. Cannot compress further.")
                             self._persist_session(messages, conversation_history)
-                            return {
+                            return self._attach_metrics_to_result({
                                 "messages": messages,
                                 "completed": False,
                                 "api_calls": api_call_count,
                                 "error": "Request payload too large (413). Cannot compress further.",
                                 "partial": True
-                            }
+                            })
 
                     # Check for context-length errors BEFORE generic 4xx handler.
                     # Local backends (LM Studio, Ollama, llama.cpp) often return
@@ -7658,13 +7927,13 @@ class AIAgent:
                             self._vprint(f"{self.log_prefix}   💡 Try /new to start a fresh conversation, or /compress to retry compression.", force=True)
                             logging.error(f"{self.log_prefix}Context compression failed after {max_compression_attempts} attempts.")
                             self._persist_session(messages, conversation_history)
-                            return {
+                            return self._attach_metrics_to_result({
                                 "messages": messages,
                                 "completed": False,
                                 "api_calls": api_call_count,
                                 "error": f"Context length exceeded: max compression attempts ({max_compression_attempts}) reached.",
                                 "partial": True
-                            }
+                            })
                         self._vprint(f"{self.log_prefix}   🗜️  Context compression attempt {compression_attempts}/{max_compression_attempts}...")
 
                         original_len = len(messages)
@@ -7685,13 +7954,13 @@ class AIAgent:
                             self._vprint(f"{self.log_prefix}   💡 The conversation has accumulated too much content. Try /new to start fresh, or /compress to manually trigger compression.", force=True)
                             logging.error(f"{self.log_prefix}Context length exceeded: {approx_tokens:,} tokens. Cannot compress further.")
                             self._persist_session(messages, conversation_history)
-                            return {
+                            return self._attach_metrics_to_result({
                                 "messages": messages,
                                 "completed": False,
                                 "api_calls": api_call_count,
                                 "error": f"Context length exceeded ({approx_tokens:,} tokens). Cannot compress further.",
                                 "partial": True
-                            }
+                            })
 
                     # Check for non-retryable client errors (4xx HTTP status codes).
                     # These indicate a problem with the request itself (bad model ID,
@@ -7759,14 +8028,14 @@ class AIAgent:
                             )
                         else:
                             self._persist_session(messages, conversation_history)
-                        return {
+                        return self._attach_metrics_to_result({
                             "final_response": None,
                             "messages": messages,
                             "api_calls": api_call_count,
                             "completed": False,
                             "failed": True,
                             "error": str(api_error),
-                        }
+                        })
 
                     if retry_count >= max_retries:
                         # Try fallback before giving up entirely
@@ -7829,14 +8098,14 @@ class AIAgent:
                                 "execute_code with Python's open() for large "
                                 "files, or to write in smaller sections."
                             )
-                        return {
+                        return self._attach_metrics_to_result({
                             "final_response": _final_response,
                             "messages": messages,
                             "api_calls": api_call_count,
                             "completed": False,
                             "failed": True,
                             "error": _final_summary,
-                        }
+                        })
 
                     # For rate limits, respect the Retry-After header if present
                     _retry_after = None
@@ -7870,13 +8139,13 @@ class AIAgent:
                             self._vprint(f"{self.log_prefix}⚡ Interrupt detected during retry wait, aborting.", force=True)
                             self._persist_session(messages, conversation_history)
                             self.clear_interrupt()
-                            return {
+                            return self._attach_metrics_to_result({
                                 "final_response": f"Operation interrupted: retrying API call after error (retry {retry_count}/{max_retries}).",
                                 "messages": messages,
                                 "api_calls": api_call_count,
                                 "completed": False,
                                 "interrupted": True,
-                            }
+                            })
                         time.sleep(0.2)  # Check interrupt every 200ms
             
             # If the API call was interrupted, skip response processing
@@ -7983,14 +8252,14 @@ class AIAgent:
                         self._cleanup_task_resources(effective_task_id)
                         self._persist_session(messages, conversation_history)
                         
-                        return {
+                        return self._attach_metrics_to_result({
                             "final_response": None,
                             "messages": rolled_back_messages,
                             "api_calls": api_call_count,
                             "completed": False,
                             "partial": True,
                             "error": "Incomplete REASONING_SCRATCHPAD after 2 retries"
-                        }
+                        })
                 
                 # Reset incomplete scratchpad counter on clean response
                 if hasattr(self, '_incomplete_scratchpad_retries'):
@@ -8035,14 +8304,14 @@ class AIAgent:
 
                     self._codex_incomplete_retries = 0
                     self._persist_session(messages, conversation_history)
-                    return {
+                    return self._attach_metrics_to_result({
                         "final_response": None,
                         "messages": messages,
                         "api_calls": api_call_count,
                         "completed": False,
                         "partial": True,
                         "error": "Codex response remained incomplete after 3 continuation attempts",
-                    }
+                    })
                 elif hasattr(self, "_codex_incomplete_retries"):
                     self._codex_incomplete_retries = 0
                 
@@ -8083,14 +8352,14 @@ class AIAgent:
                             self._vprint(f"{self.log_prefix}❌ Max retries (3) for invalid tool calls exceeded. Stopping as partial.", force=True)
                             self._invalid_tool_retries = 0
                             self._persist_session(messages, conversation_history)
-                            return {
+                            return self._attach_metrics_to_result({
                                 "final_response": None,
                                 "messages": messages,
                                 "api_calls": api_call_count,
                                 "completed": False,
                                 "partial": True,
                                 "error": f"Model generated invalid tool call: {invalid_preview}"
-                            }
+                            })
 
                         assistant_msg = self._build_assistant_message(assistant_message, finish_reason)
                         messages.append(assistant_msg)
@@ -8382,14 +8651,14 @@ class AIAgent:
                             self._cleanup_task_resources(effective_task_id)
                             self._persist_session(messages, conversation_history)
 
-                            return {
+                            return self._attach_metrics_to_result({
                                 "final_response": final_response or None,
                                 "messages": messages,
                                 "api_calls": api_call_count,
                                 "completed": False,
                                 "partial": True,
                                 "error": "Model generated only think blocks with no actual response after 3 retries"
-                            }
+                            })
                     
                     # Reset retry counter on successful content
                     if hasattr(self, '_empty_content_retries'):
@@ -8543,7 +8812,7 @@ class AIAgent:
                 break
 
         # Build result with interrupt info if applicable
-        result = {
+        result = self._attach_metrics_to_result({
             "final_response": final_response,
             "last_reasoning": last_reasoning,
             "messages": messages,
@@ -8567,7 +8836,7 @@ class AIAgent:
             "estimated_cost_usd": self.session_estimated_cost_usd,
             "cost_status": self.session_cost_status,
             "cost_source": self.session_cost_source,
-        }
+        })
         self._response_was_previewed = False
         
         # Include interrupt message if one triggered the interrupt

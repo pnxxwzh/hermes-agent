@@ -322,6 +322,7 @@ class TestSparkGraphBackgroundReview:
 
     def test_enable_background_review_sparkgraph_appends_tool(self, agent):
         agent._sparkgraph_enabled = True
+        agent._sparkgraph_review_enabled = True
         review_agent = SimpleNamespace(
             _sparkgraph_enabled=True,
             _sparkgraph_store=MagicMock(),
@@ -1809,8 +1810,6 @@ class TestRunConversation:
                 source_kind="flush",
                 status=NodeStatus.DEPRECATED,
                 confidence=0.95,
-                stability=0.95,
-                reuse_score=0.9,
             )
         )
         original_cached = agent._cached_system_prompt
@@ -1831,7 +1830,7 @@ class TestRunConversation:
         assert "[SparkGraph Recall]" not in api_messages[0]["content"]
         assert api_messages[0]["content"] == original_cached
 
-    def test_sparkgraph_recall_skips_low_stability_active_nodes_in_real_manager(self, agent, tmp_path):
+    def test_sparkgraph_recall_skips_non_injectable_active_nodes_in_real_manager(self, agent, tmp_path):
         self._setup_agent(agent)
         agent._sparkgraph_enabled = True
         agent._sparkgraph_manager = SparkGraphManager.from_raw_config({}, hermes_home=tmp_path)
@@ -1844,8 +1843,7 @@ class TestRunConversation:
                 source_kind="flush",
                 status=NodeStatus.ACTIVE,
                 confidence=0.95,
-                stability=0.20,
-                reuse_score=0.9,
+                default_inject=False,
             )
         )
         original_cached = agent._cached_system_prompt

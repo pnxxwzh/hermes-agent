@@ -25,6 +25,10 @@ class AssemblyContext:
         Working directory for context-file discovery.
     conversation_history
         Current message list (before system prefix is prepended).
+    prefill_messages
+        Request-time assistant prefill messages, if any.
+    tool_schemas
+        Tool schema payloads available for the current request.
     """
 
     agent: "AIAgent"
@@ -32,3 +36,5 @@ class AssemblyContext:
     user_message: str | None = None
     cwd: str | None = None
     conversation_history: list[dict[str, Any]] = field(default_factory=list)
+    prefill_messages: list[dict[str, Any]] = field(default_factory=list)
+    tool_schemas: list[dict[str, Any]] = field(default_factory=list)

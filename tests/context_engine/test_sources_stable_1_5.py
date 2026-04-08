@@ -5,6 +5,7 @@ from unittest.mock import patch, MagicMock
 
 from agent.context_engine.context import AssemblyContext
 from agent.context_engine.models import ContextChunk
+from agent.prompt_builder import DEFAULT_AGENT_IDENTITY
 from agent.context_engine.sources import (
     IdentitySource,
     ToolGuidanceSource,
@@ -38,14 +39,16 @@ class TestIdentitySource:
             assert len(chunks) == 1
             assert chunks[0].slot == "default"
             assert chunks[0].metadata["has_soul"] is False
-            assert chunks[0].content == "You are Hermes Agent"
+            assert chunks[0].content == DEFAULT_AGENT_IDENTITY
 
     def test_identity_source_ai_peer_substitution(self):
         """T6.3: ai_peer_name replaces default identity."""
         with patch("agent.context_engine.sources.wrap_load_soul_md", return_value=("", None)):
             src = IdentitySource(ai_peer_name="MyBot")
             chunks = src.collect(AssemblyContext(agent=MagicMock()))
-            assert chunks[0].content == "You are MyBot"
+            assert chunks[0].content == DEFAULT_AGENT_IDENTITY.replace(
+                "You are Hermes Agent", "You are MyBot", 1,
+            )
 
     def test_identity_source_default_identity_custom(self):
         """T6.x: custom default_identity used."""
@@ -70,7 +73,7 @@ class TestIdentitySource:
             src = IdentitySource(load_soul=False)
             chunks = src.collect(AssemblyContext(agent=MagicMock()))
             assert chunks[0].slot == "default"
-            assert chunks[0].content == "You are Hermes Agent"
+            assert chunks[0].content == DEFAULT_AGENT_IDENTITY
             mock_load.assert_not_called()
 
 

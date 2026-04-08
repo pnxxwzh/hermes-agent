@@ -280,6 +280,31 @@ class TestAssemblerDynamic:
         result = assembler.assemble_dynamic()
         assert [c.source for c in result.dynamic_chunks] == ["d1", "d2"]
 
+    def test_default_dynamic_factories_include_honcho_turn(self):
+        """T9.x: generic ContextAssembler includes honcho turn context by default."""
+        mock_agent = MagicMock()
+        mock_agent._honcho = MagicMock()
+        mock_agent._honcho.get_turn_context.return_value = "HONCHO TURN"
+        mock_agent.session_id = None
+        mock_agent._sparkgraph_manager = None
+        mock_agent._sparkgraph_enabled = False
+        mock_agent._plugin_turn_context_ready = False
+        mock_agent._plugin_turn_context = ""
+        mock_agent._sparkgraph_turn_context_ready = False
+        mock_agent._sparkgraph_turn_context = ""
+        mock_agent.ephemeral_system_prompt = ""
+        mock_agent.model = ""
+        mock_agent.platform = ""
+
+        assembler = ContextAssembler(mock_agent)
+        result = assembler.assemble_dynamic(
+            user_message="hello",
+            conversation_history=[],
+        )
+
+        assert any(c.source == "honcho_turn" for c in result.dynamic_chunks)
+        assert "HONCHO TURN" in result.dynamic_system
+
 
 class TestAssemblerAll:
     """T9: assemble_all convenience method."""

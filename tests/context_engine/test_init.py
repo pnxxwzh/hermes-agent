@@ -16,7 +16,24 @@ class TestExports:
             "ContextMetrics",
             "SourceMetrics",
             "AssemblyResult",
+            "InputNode",
+            "InputAssembly",
+            "AssemblySnapshots",
+            "RequestBucketMetrics",
+            "RequestMetrics",
+            "TransportAdapter",
+            "TransportPayload",
+            "ChatCompletionsTransportAdapter",
+            "CodexResponsesTransportAdapter",
+            "AnthropicMessagesTransportAdapter",
             "AssemblyContext",
+            "ConversationMessagesSource",
+            "PrefillMessagesSource",
+            "ToolSchemasSource",
+            "build_request_metrics",
+            "rough_tokens_from_message",
+            "rough_tokens_from_text",
+            "get_transport_adapter",
             "STABLE_SOURCE_FACTORIES",
             "DYNAMIC_SOURCE_FACTORIES",
             "register_stable",
@@ -58,5 +75,19 @@ class TestExports:
             assembler = ce.get_assembler(mock_agent)
             assert isinstance(assembler, ce.ContextAssembler)
             assert assembler._agent is mock_agent
+        finally:
+            ce.ASSEMBLER = original
+
+    def test_get_assembler_rebinds_when_agent_changes(self):
+        """T10.x: a different agent gets a different bound assembler."""
+        original = ce.ASSEMBLER
+        ce.ASSEMBLER = None
+        try:
+            agent_a = MagicMock()
+            agent_b = MagicMock()
+            assembler_a = ce.get_assembler(agent_a)
+            assembler_b = ce.get_assembler(agent_b)
+            assert assembler_a is not assembler_b
+            assert assembler_b._agent is agent_b
         finally:
             ce.ASSEMBLER = original

@@ -192,10 +192,12 @@ def test_setup_sparkgraph_probe_failure_can_restore_defaults(tmp_path, monkeypat
 
     setup_sparkgraph(config)
 
-    # After restoring defaults with the new default config, embedding uses local bge-m3 server
-    assert config["sparkgraph"]["embedding"]["provider"] == "custom"
-    assert config["sparkgraph"]["embedding"]["model"] == "bge-m3-mlx-8bit"
-    assert config["sparkgraph"]["embedding"]["base_url"] == "http://127.0.0.1:8000/v1"
+    # After restoring defaults, embedding returns to the empty opt-in defaults.
+    assert config["sparkgraph"]["embedding"]["provider"] == ""
+    assert config["sparkgraph"]["embedding"]["model"] == ""
+    assert config["sparkgraph"]["embedding"]["base_url"] == ""
+    assert config["sparkgraph"]["embedding"]["api_key"] == ""
+    assert config["sparkgraph"]["embedding"]["timeout"] == 20
 
 
 def test_setup_sparkgraph_embedding_prompt_order(tmp_path, monkeypatch):
@@ -303,10 +305,11 @@ def test_setup_sparkgraph_probe_failure_prefers_keep_current_over_reset(tmp_path
 def test_cli_setup_accepts_sparkgraph_section(monkeypatch):
     called = {}
 
-    def fake_cmd_setup(args):
+    def fake_run_setup_wizard(args):
         called["section"] = args.section
 
-    monkeypatch.setattr("hermes_cli.main.cmd_setup", fake_cmd_setup)
+    monkeypatch.setattr("hermes_cli.setup.run_setup_wizard", fake_run_setup_wizard)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
     monkeypatch.setattr(sys, "argv", ["hermes", "setup", "sparkgraph"])
 
     main()

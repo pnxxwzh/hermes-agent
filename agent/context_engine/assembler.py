@@ -6,10 +6,16 @@ import logging
 from typing import TYPE_CHECKING
 
 from agent.context_engine.context import AssemblyContext
+from agent.context_engine.input_models import InputAssembly, InputNode
 from agent.context_engine.models import AssemblyResult, ContextChunk
 from agent.context_engine.registry import DYNAMIC_SOURCE_FACTORIES, STABLE_SOURCE_FACTORIES
 
 if TYPE_CHECKING:
+    from agent.context_engine.input_sources import (
+        ConversationMessagesSource,
+        PrefillMessagesSource,
+        ToolSchemasSource,
+    )
     from agent.context_engine.sources import (
         EphemeralSystemSource,
         HonchoStaticSource,
@@ -175,8 +181,23 @@ def _honcho_turn_factory(ctx: AssemblyContext) -> list[ContextChunk]:
     return HonchoTurnSource(honcho_session_manager=manager).collect(ctx)
 
 
+def _conversation_messages_factory(ctx: AssemblyContext) -> list[InputNode]:
+    from agent.context_engine.input_sources import ConversationMessagesSource
+    return ConversationMessagesSource().collect(ctx)
+
+
+def _prefill_messages_factory(ctx: AssemblyContext) -> list[InputNode]:
+    from agent.context_engine.input_sources import PrefillMessagesSource
+    return PrefillMessagesSource().collect(ctx)
+
+
+def _tool_schemas_factory(ctx: AssemblyContext) -> list[InputNode]:
+    from agent.context_engine.input_sources import ToolSchemasSource
+    return ToolSchemasSource().collect(ctx)
+
+
 # ---------------------------------------------------------------------------
-# Stable and dynamic source lists (in assembly order)
+# Stable, dynamic, and request source lists (in assembly order)
 # ---------------------------------------------------------------------------
 
 STABLE_FACTORIES = [
@@ -196,6 +217,13 @@ DYNAMIC_FACTORIES = [
     ("ephemeral", _ephemeral_factory),
     ("plugin", _plugin_factory),
     ("sparkgraph_recall", _sparkgraph_factory),
+    ("honcho_turn", _honcho_turn_factory),
+]
+
+REQUEST_FACTORIES = [
+    ("conversation_messages", _conversation_messages_factory),
+    ("prefill_messages", _prefill_messages_factory),
+    ("tool_schemas", _tool_schemas_factory),
 ]
 
 
@@ -211,6 +239,7 @@ class ContextAssembler:
         agent,
         stable_factories: list = None,
         dynamic_factories: list = None,
+        request_factories: list = None,
     ):
         self._agent = agent
         self._stable_factories = (
@@ -223,6 +252,7 @@ class ContextAssembler:
             if dynamic_factories is None
             else dynamic_factories
         )
+        self._request_factories = REQUEST_FACTORIES if request_factories is None else request_factories
 
     @staticmethod
     def _merge_registered_factories(
@@ -259,18 +289,116 @@ class ContextAssembler:
                 chunks.extend(result)
         return chunks
 
+    def _collect_input_nodes(
+        self,
+        factories: list,
+        ctx: AssemblyContext,
+    ) -> list[InputNode]:
+        """Collect request-stage input nodes from all factories."""
+        nodes: list[InputNode] = []
+        for name, factory in factories:
+            try:
+                result = factory(ctx)
+            except Exception as exc:
+                logger.warning(
+                    "Input source '%s' failed during assembly: %s",
+                    name,
+                    exc,
+                )
+                result = []
+            if result:
+                nodes.extend(result)
+        return nodes
+
+    @staticmethod
+    def _build_effective_system(
+        stable_chunks: list[ContextChunk],
+        dynamic_chunks: list[ContextChunk],
+    ) -> str:
+        """Build the effective system prompt string from context chunks."""
+        return AssemblyResult.from_chunks(
+            stable_chunks=stable_chunks,
+            dynamic_chunks=dynamic_chunks,
+        ).effective_system
+
+    @staticmethod
+    def _build_normalized_messages(
+        conversation_history: list | None,
+    ) -> list[dict]:
+        """Build a normalized, detached copy of semantic conversation messages."""
+        if not conversation_history:
+            return []
+        normalized: list[dict] = []
+        for message in conversation_history:
+            if isinstance(message, dict):
+                normalized.append(dict(message))
+            else:
+                normalized.append({"content": message})
+        return normalized
+
+    def assemble(
+        self,
+        *,
+        system_message: str | None = None,
+        user_message: str | None = None,
+        conversation_history: list | None = None,
+        prefill_messages: list | None = None,
+        tool_schemas: list | None = None,
+        _include_stable: bool = True,
+        _include_dynamic: bool = True,
+        _include_request: bool = True,
+    ) -> InputAssembly:
+        """Assemble the full semantic model input without transport shaping."""
+        ctx = AssemblyContext(
+            agent=self._agent,
+            system_message=system_message,
+            user_message=user_message,
+            cwd=getattr(self._agent, "_context_cwd", None),
+            conversation_history=conversation_history or [],
+            prefill_messages=prefill_messages or [],
+            tool_schemas=tool_schemas or [],
+        )
+        stable_chunks = self._collect(self._stable_factories, ctx) if _include_stable else []
+        dynamic_chunks = self._collect(self._dynamic_factories, ctx) if _include_dynamic else []
+        request_nodes = (
+            self._collect_input_nodes(self._request_factories, ctx)
+            if _include_request
+            else []
+        )
+        stable_nodes = [InputNode.from_context_chunk(chunk) for chunk in stable_chunks]
+        dynamic_nodes = [InputNode.from_context_chunk(chunk) for chunk in dynamic_chunks]
+        return InputAssembly(
+            stable_nodes=stable_nodes,
+            dynamic_nodes=dynamic_nodes,
+            request_nodes=request_nodes,
+            effective_system=self._build_effective_system(stable_chunks, dynamic_chunks),
+            normalized_messages=(
+                self._build_normalized_messages(conversation_history)
+                if _include_request
+                else []
+            ),
+            prefill_messages=(
+                self._build_normalized_messages(prefill_messages)
+                if _include_request
+                else []
+            ),
+            tool_schemas=list(tool_schemas or []) if _include_request else [],
+        )
+
     def assemble_stable(self, system_message: str = None) -> AssemblyResult:
         """Assemble stable system prompt.
 
         Caching is handled by run_agent.py.
         """
-        ctx = AssemblyContext(
-            agent=self._agent,
+        assembly = self.assemble(
             system_message=system_message,
-            cwd=getattr(self._agent, "_context_cwd", None),
+            _include_dynamic=False,
+            _include_request=False,
         )
-        chunks = self._collect(self._stable_factories, ctx)
-        return AssemblyResult.from_chunks(stable_chunks=chunks, dynamic_chunks=[])
+        return AssemblyResult.from_chunks(
+            stable_chunks=assembly.context_chunks("stable"),
+            dynamic_chunks=[],
+        )
 
     def assemble_dynamic(
         self,
@@ -278,13 +406,16 @@ class ContextAssembler:
         conversation_history: list = None,
     ) -> AssemblyResult:
         """Assemble dynamic system additions for current turn."""
-        ctx = AssemblyContext(
-            agent=self._agent,
+        assembly = self.assemble(
             user_message=user_message,
-            conversation_history=conversation_history or [],
+            conversation_history=conversation_history,
+            _include_stable=False,
+            _include_request=False,
         )
-        chunks = self._collect(self._dynamic_factories, ctx)
-        return AssemblyResult.from_chunks(stable_chunks=[], dynamic_chunks=chunks)
+        return AssemblyResult.from_chunks(
+            stable_chunks=[],
+            dynamic_chunks=assembly.context_chunks("dynamic"),
+        )
 
     def assemble_all(
         self,
@@ -293,16 +424,12 @@ class ContextAssembler:
         conversation_history: list = None,
     ) -> AssemblyResult:
         """Assemble both stable and dynamic in one call."""
-        ctx = AssemblyContext(
-            agent=self._agent,
+        assembly = self.assemble(
             system_message=system_message,
             user_message=user_message,
-            conversation_history=conversation_history or [],
-            cwd=getattr(self._agent, "_context_cwd", None),
+            conversation_history=conversation_history,
         )
-        stable_chunks = self._collect(self._stable_factories, ctx)
-        dynamic_chunks = self._collect(self._dynamic_factories, ctx)
         return AssemblyResult.from_chunks(
-            stable_chunks=stable_chunks,
-            dynamic_chunks=dynamic_chunks,
+            stable_chunks=assembly.context_chunks("stable"),
+            dynamic_chunks=assembly.context_chunks("dynamic"),
         )

@@ -3,7 +3,7 @@
 import pytest
 from unittest.mock import MagicMock, patch
 
-from agent.context_engine.models import ContextMetrics, SourceMetrics
+from agent.context_engine.models import ContextChunk, ContextMetrics, SourceMetrics
 
 
 class TestBuildSystemPromptIntegration:
@@ -212,3 +212,37 @@ class TestBuildSystemPromptIntegration:
         agent._build_system_prompt()
 
         assert agent._stable_context_metrics is stable_metrics
+
+    def test_build_system_prompt_caches_stable_chunks(self):
+        """T11.x: stable chunks are retained for request-level metrics later."""
+        from run_agent import AIAgent
+        with patch("run_agent.OpenAI"), \
+             patch("run_agent.get_tool_definitions", return_value=[]), \
+             patch("run_agent.check_toolset_requirements", return_value={}):
+            agent = AIAgent(
+                api_key="test-key",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+
+        chunk = ContextChunk(
+            source="identity",
+            stage="stable",
+            slot="default",
+            priority=1,
+            content="stable identity",
+        )
+        mock_metrics = MagicMock(total_estimated_tokens=3)
+        mock_result = MagicMock(
+            stable_system="stable",
+            metrics=mock_metrics,
+            stable_chunks=[chunk],
+        )
+        mock_assembler = MagicMock()
+        mock_assembler.assemble_stable.return_value = mock_result
+        agent._context_assembler = mock_assembler
+
+        agent._build_system_prompt()
+
+        assert agent._stable_context_chunks == [chunk]

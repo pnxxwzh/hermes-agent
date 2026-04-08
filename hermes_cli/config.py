@@ -228,6 +228,11 @@ DEFAULT_CONFIG = {
         # (force on/off for all models), or a list of model-name substrings
         # to match (e.g. ["gpt", "codex", "gemini", "qwen"]).
         "tool_use_enforcement": "auto",
+        "context_engine": {
+            "unified_input_engine": False,
+            "unified_input_shadow_compare": True,
+            "unified_input_compare_fail_fast": False,
+        },
     },
     
     "terminal": {

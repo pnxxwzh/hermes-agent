@@ -517,3 +517,21 @@ class TestDynamicLayerIntegration:
         assert api_messages[0]["content"] == "STABLE"
         assert api_messages[1]["content"] == "before"
         assert "USER-MESSAGE HONCHO" in api_messages[2]["content"]
+
+    def test_run_agent_default_context_assembler_omits_honcho_turn_factory(self):
+        """run_agent keeps legacy Honcho user-message injection semantics."""
+        from run_agent import AIAgent
+        with patch("run_agent.OpenAI"), \
+             patch("run_agent.get_tool_definitions", return_value=[]), \
+             patch("run_agent.check_toolset_requirements", return_value={}):
+            agent = AIAgent(
+                api_key="test-key",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+
+        agent._context_assembler = None
+        assembler = agent._get_context_assembler()
+
+        assert all(name != "honcho_turn" for name, _ in assembler._dynamic_factories)
