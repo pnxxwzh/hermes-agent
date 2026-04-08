@@ -33,7 +33,16 @@ def _safe_len(value: Any) -> int:
 
 def rough_tokens_from_message(message: dict[str, Any]) -> int:
     """Rough token estimate for a message payload."""
-    return _safe_len(message) // _CHARS_PER_TOKEN
+    return _safe_len(_message_metric_view(message)) // _CHARS_PER_TOKEN
+
+
+def _message_metric_view(message: dict[str, Any]) -> dict[str, Any]:
+    """Return a metrics-safe message view without transport-only wrapper fields."""
+    if not isinstance(message, dict):
+        return message
+    metric_message = dict(message)
+    metric_message.pop("cache_control", None)
+    return metric_message
 
 
 def _bucket_for_context_source(source: str) -> str:
@@ -42,13 +51,20 @@ def _bucket_for_context_source(source: str) -> str:
     return f"{_CONTEXT_BUCKET_PREFIX}{source}"
 
 
-def _bucket_for_message(message: dict[str, Any]) -> str:
+def _bucket_for_message(message: dict[str, Any], *, heat: str | None = None) -> str:
     role = str(message.get("role", "") or "").strip().lower()
     if role == "user":
         return "messages_user"
     if role == "assistant":
         return "messages_assistant"
     if role == "tool":
+        normalized_heat = str(heat or "").strip().lower()
+        if normalized_heat == "warm":
+            return "messages_tool_warm"
+        if normalized_heat == "cold":
+            return "messages_tool_cold"
+        if normalized_heat == "hot":
+            return "messages_tool_hot"
         return "messages_tool"
     return "messages_other"
 
@@ -91,6 +107,7 @@ def build_request_metrics(
     prefill_messages: list[dict[str, Any]] | None = None,
     tools: list[dict[str, Any]] | None = None,
     context_metrics: ContextMetrics | None = None,
+    message_heat_by_index: dict[int, str] | None = None,
 ) -> RequestMetrics:
     """Build request-level metrics from context chunks and request payload buckets."""
 
@@ -141,10 +158,10 @@ def build_request_metrics(
             metadata={"stage": "dynamic"},
         )
 
-    for message in messages or []:
+    for idx, message in enumerate(messages or []):
         add_bucket(
-            _bucket_for_message(message),
-            char_count=_safe_len(message),
+            _bucket_for_message(message, heat=(message_heat_by_index or {}).get(idx)),
+            char_count=_safe_len(_message_metric_view(message)),
             category="messages",
         )
 

@@ -1199,6 +1199,9 @@ class AIAgent:
             _context_engine_section.get("unified_input_compare_fail_fast"),
             False,
         )
+        self._tool_compaction_section = _context_engine_section.get("tool_compaction", {})
+        if not isinstance(self._tool_compaction_section, dict):
+            self._tool_compaction_section = {}
         self._last_unified_input_compare_diff = None
 
         # Initialize context compressor for automatic context management
@@ -1267,6 +1270,8 @@ class AIAgent:
         self._stable_context_metrics = None  # cached stable-only ContextMetrics
         self._last_context_metrics = None  # cached ContextMetrics from last assembly
         self._last_request_metrics = None  # cached RequestMetrics from last request build
+        self._last_tool_compaction_snapshot = None
+        self._last_tool_message_heat_sidecar = None
         self._user_turn_count = 0
 
         # Cumulative token usage for the session
@@ -1324,6 +1329,8 @@ class AIAgent:
         # Turn counter (added after reset_session_state was first written — #2635)
         self._user_turn_count = 0
         self._last_request_metrics = None
+        self._last_tool_compaction_snapshot = None
+        self._last_tool_message_heat_sidecar = None
 
         # Context compressor internal counters (if present)
         if hasattr(self, "context_compressor") and self.context_compressor:
@@ -2955,6 +2962,7 @@ class AIAgent:
         prefill_messages: list[dict[str, Any]] | None,
         tool_schemas: list[dict[str, Any]] | None,
         dynamic_chunks: list | None,
+        tool_compaction_snapshot=None,
     ):
         """Assemble the unified semantic input graph for shadow comparison."""
         from agent.context_engine import InputAssembly, InputNode
@@ -2985,7 +2993,73 @@ class AIAgent:
             normalized_messages=list(request_only.normalized_messages),
             prefill_messages=list(request_only.prefill_messages),
             tool_schemas=list(request_only.tool_schemas),
+            tool_compaction_snapshot=tool_compaction_snapshot,
         )
+
+    def _get_tool_compaction_config(self):
+        """Return the normalized request-view tool compaction config."""
+        from agent.context_engine import ToolCompactionConfig
+
+        section = dict(self._tool_compaction_section or {})
+
+        def _as_bool(value, default):
+            if value is None:
+                return default
+            if isinstance(value, bool):
+                return value
+            return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+        def _as_int(value, default):
+            try:
+                return int(value)
+            except Exception:
+                return int(default)
+
+        config = ToolCompactionConfig(
+            enabled=_as_bool(section.get("enabled"), True),
+            retain_recent_user_turns=max(1, _as_int(section.get("retain_recent_user_turns"), 3)),
+            retain_recent_tool_groups_in_turn=max(
+                1,
+                _as_int(section.get("retain_recent_tool_groups_in_turn"), 2),
+            ),
+            current_turn_tool_budget_chars=max(
+                0,
+                _as_int(section.get("current_turn_tool_budget_chars"), 12000),
+            ),
+            historical_tool_budget_chars=max(
+                0,
+                _as_int(section.get("historical_tool_budget_chars"), 24000),
+            ),
+            warm_head_chars=max(0, _as_int(section.get("warm_head_chars"), 1200)),
+            warm_tail_chars=max(0, _as_int(section.get("warm_tail_chars"), 400)),
+            cold_head_chars=max(0, _as_int(section.get("cold_head_chars"), 400)),
+            cold_tail_chars=max(0, _as_int(section.get("cold_tail_chars"), 200)),
+        )
+        if config.cold_head_chars > config.warm_head_chars:
+            config.cold_head_chars = config.warm_head_chars
+        if config.cold_tail_chars > config.warm_tail_chars:
+            config.cold_tail_chars = config.warm_tail_chars
+        min_warm_budget = config.warm_head_chars + config.warm_tail_chars + 64
+        min_cold_budget = config.cold_head_chars + config.cold_tail_chars + 64
+        if config.current_turn_tool_budget_chars < min_warm_budget:
+            config.current_turn_tool_budget_chars = min_warm_budget
+        if config.historical_tool_budget_chars < min_cold_budget:
+            config.historical_tool_budget_chars = min_cold_budget
+        return config
+
+    def _shape_messages_for_request(self, messages: list[dict[str, Any]]):
+        """Return request-view messages with tool outputs compacted by heat."""
+        from agent.context_engine import shape_tool_history
+
+        config = self._get_tool_compaction_config()
+        if not config.enabled:
+            self._last_tool_compaction_snapshot = None
+            self._last_tool_message_heat_sidecar = None
+            return None
+        snapshot = shape_tool_history(messages, config)
+        self._last_tool_compaction_snapshot = snapshot
+        self._last_tool_message_heat_sidecar = dict(snapshot.message_heat_by_index)
+        return snapshot
 
     def _build_transport_payload(
         self,
@@ -3066,14 +3140,25 @@ class AIAgent:
 
     @staticmethod
     def _sanitize_api_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        sanitized, _ = AIAgent._sanitize_api_messages_with_heat(messages)
+        return sanitized
+
+    @staticmethod
+    def _sanitize_api_messages_with_heat(
+        messages: List[Dict[str, Any]],
+        message_heat_by_index: Dict[int, str] | None = None,
+    ) -> tuple[List[Dict[str, Any]], Dict[int, str]]:
         """Fix orphaned tool_call / tool_result pairs before every LLM call.
 
         Runs unconditionally — not gated on whether the context compressor
         is present — so orphans from session loading or manual message
         manipulation are always caught.
         """
+        working_messages = [dict(msg) for msg in messages]
+        heat_by_index = dict(message_heat_by_index or {})
+
         surviving_call_ids: set = set()
-        for msg in messages:
+        for msg in working_messages:
             if msg.get("role") == "assistant":
                 for tc in msg.get("tool_calls") or []:
                     cid = AIAgent._get_tool_call_id_static(tc)
@@ -3081,7 +3166,7 @@ class AIAgent:
                         surviving_call_ids.add(cid)
 
         result_call_ids: set = set()
-        for msg in messages:
+        for msg in working_messages:
             if msg.get("role") == "tool":
                 cid = msg.get("tool_call_id")
                 if cid:
@@ -3090,10 +3175,17 @@ class AIAgent:
         # 1. Drop tool results with no matching assistant call
         orphaned_results = result_call_ids - surviving_call_ids
         if orphaned_results:
-            messages = [
-                m for m in messages
-                if not (m.get("role") == "tool" and m.get("tool_call_id") in orphaned_results)
-            ]
+            filtered_messages: List[Dict[str, Any]] = []
+            filtered_heat: Dict[int, str] = {}
+            for idx, message in enumerate(working_messages):
+                if message.get("role") == "tool" and message.get("tool_call_id") in orphaned_results:
+                    continue
+                next_idx = len(filtered_messages)
+                filtered_messages.append(message)
+                if idx in heat_by_index:
+                    filtered_heat[next_idx] = heat_by_index[idx]
+            working_messages = filtered_messages
+            heat_by_index = filtered_heat
             logger.debug(
                 "Pre-call sanitizer: removed %d orphaned tool result(s)",
                 len(orphaned_results),
@@ -3103,8 +3195,12 @@ class AIAgent:
         missing_results = surviving_call_ids - result_call_ids
         if missing_results:
             patched: List[Dict[str, Any]] = []
-            for msg in messages:
+            patched_heat: Dict[int, str] = {}
+            for idx, msg in enumerate(working_messages):
+                next_idx = len(patched)
                 patched.append(msg)
+                if idx in heat_by_index:
+                    patched_heat[next_idx] = heat_by_index[idx]
                 if msg.get("role") == "assistant":
                     for tc in msg.get("tool_calls") or []:
                         cid = AIAgent._get_tool_call_id_static(tc)
@@ -3114,12 +3210,93 @@ class AIAgent:
                                 "content": "[Result unavailable — see context summary above]",
                                 "tool_call_id": cid,
                             })
-            messages = patched
+                            patched_heat[len(patched) - 1] = "hot"
+            working_messages = patched
+            heat_by_index = patched_heat
             logger.debug(
                 "Pre-call sanitizer: added %d stub tool result(s)",
                 len(missing_results),
             )
-        return messages
+        return working_messages, heat_by_index
+
+    @staticmethod
+    def _conversation_segment_for_metrics(
+        api_messages: List[Dict[str, Any]],
+        *,
+        effective_system: str,
+        prefill_messages: list[dict[str, Any]] | None,
+    ) -> list[dict[str, Any]]:
+        start_idx = 1 if effective_system else 0
+        start_idx += len(prefill_messages or [])
+        return [dict(message) for message in api_messages[start_idx:]]
+
+    @staticmethod
+    def _align_tool_heat_to_final_messages(
+        original_messages: list[dict[str, Any]],
+        message_heat_by_index: Dict[int, str] | None,
+        final_messages: list[dict[str, Any]],
+    ) -> Dict[int, str]:
+        heat_by_index = dict(message_heat_by_index or {})
+        heat_by_tool_call_id: Dict[str, list[str]] = {}
+        unnamed_heats: list[str] = []
+        for idx, message in enumerate(original_messages):
+            if str(message.get("role", "") or "").strip().lower() != "tool":
+                continue
+            heat = heat_by_index.get(idx)
+            if not heat:
+                continue
+            tool_call_id = str(message.get("tool_call_id", "") or "")
+            if not tool_call_id:
+                unnamed_heats.append(heat)
+                continue
+            heat_by_tool_call_id.setdefault(tool_call_id, []).append(heat)
+
+        aligned: Dict[int, str] = {}
+        for idx, message in enumerate(final_messages):
+            if str(message.get("role", "") or "").strip().lower() != "tool":
+                continue
+            tool_call_id = str(message.get("tool_call_id", "") or "")
+            queue = heat_by_tool_call_id.get(tool_call_id)
+            if queue:
+                aligned[idx] = queue.pop(0)
+            elif not tool_call_id and unnamed_heats:
+                aligned[idx] = unnamed_heats.pop(0)
+            else:
+                aligned[idx] = "hot"
+        return aligned
+
+    def _build_final_request_metrics(
+        self,
+        *,
+        input_assembly,
+        final_api_messages: list[dict[str, Any]],
+        effective_system: str,
+        prefill_messages: list[dict[str, Any]] | None,
+        original_request_messages: list[dict[str, Any]],
+        original_message_heat_by_index: Dict[int, str] | None,
+    ):
+        from agent.context_engine import build_request_metrics
+
+        final_conversation_messages = self._conversation_segment_for_metrics(
+            final_api_messages,
+            effective_system=effective_system,
+            prefill_messages=prefill_messages,
+        )
+        final_heat_by_index = self._align_tool_heat_to_final_messages(
+            original_request_messages,
+            original_message_heat_by_index,
+            final_conversation_messages,
+        )
+        self._last_tool_message_heat_sidecar = dict(final_heat_by_index)
+        return build_request_metrics(
+            stable_chunks=input_assembly.context_chunks("stable"),
+            dynamic_chunks=input_assembly.context_chunks("dynamic"),
+            messages=final_conversation_messages,
+            prefill_messages=list(prefill_messages or []),
+            tools=list(input_assembly.tool_schemas or []),
+            context_metrics=input_assembly.context_metrics,
+            message_heat_by_index=final_heat_by_index,
+        )
 
     @staticmethod
     def _cap_delegate_task_calls(tool_calls: list) -> list:
@@ -6798,10 +6975,14 @@ class AIAgent:
             and len(messages) > self.context_compressor.protect_first_n
                                 + self.context_compressor.protect_last_n + 1
         ):
+            preflight_shaped = self._shape_messages_for_request(messages)
+            preflight_messages = (
+                preflight_shaped.shaped_messages if preflight_shaped is not None else messages
+            )
             # Include tool schema tokens — with many tools these can add
             # 20-30K+ tokens that the old sys+msg estimate missed entirely.
             _preflight_tokens = estimate_request_tokens_rough(
-                messages,
+                preflight_messages,
                 system_prompt=active_system_prompt or "",
                 tools=self.tools or None,
             )
@@ -6836,8 +7017,12 @@ class AIAgent:
                     # pre-compression length.
                     conversation_history = None
                     # Re-estimate after compression
+                    preflight_shaped = self._shape_messages_for_request(messages)
+                    preflight_messages = (
+                        preflight_shaped.shaped_messages if preflight_shaped is not None else messages
+                    )
                     _preflight_tokens = estimate_request_tokens_rough(
-                        messages,
+                        preflight_messages,
                         system_prompt=active_system_prompt or "",
                         tools=self.tools or None,
                     )
@@ -6939,8 +7124,12 @@ class AIAgent:
             # Note: Reasoning is embedded in content via <think> tags for trajectory storage.
             # However, providers like Moonshot AI require a separate 'reasoning_content' field
             # on assistant messages with tool_calls. We handle both cases here.
+            shaped_request = self._shape_messages_for_request(messages)
+            request_messages = (
+                shaped_request.shaped_messages if shaped_request is not None else messages
+            )
             api_messages = []
-            for idx, msg in enumerate(messages):
+            for idx, msg in enumerate(request_messages):
                 api_msg = msg.copy()
 
                 if idx == current_turn_user_idx and msg.get("role") == "user" and self._honcho_turn_context:
@@ -7054,7 +7243,13 @@ class AIAgent:
             # results before sending to the API.  Runs unconditionally — not
             # gated on context_compressor — so orphans from session loading or
             # manual message manipulation are always caught.
-            api_messages = self._sanitize_api_messages(api_messages)
+            raw_message_heat_by_index = (
+                dict(shaped_request.message_heat_by_index) if shaped_request is not None else {}
+            )
+            api_messages, final_message_heat_by_index = self._sanitize_api_messages_with_heat(
+                api_messages,
+                raw_message_heat_by_index,
+            )
 
             input_assembly = None
             engine_payload = None
@@ -7064,10 +7259,11 @@ class AIAgent:
                 input_assembly = self._assemble_input_graph(
                     effective_system=effective_system,
                     user_message=original_user_message,
-                    conversation_history=messages,
+                    conversation_history=request_messages,
                     prefill_messages=self.prefill_messages,
                     tool_schemas=self.tools or [],
                     dynamic_chunks=(dynamic_result.dynamic_chunks if dynamic_result else []),
+                    tool_compaction_snapshot=shaped_request,
                 )
             except Exception as exc:
                 logger.warning(
@@ -7076,17 +7272,8 @@ class AIAgent:
                 )
                 input_assembly = None
 
-            if input_assembly is not None:
-                try:
-                    self._last_request_metrics = input_assembly.request_metrics
-                except Exception as exc:
-                    logger.warning(
-                        "Unified input request metrics failed; continuing without request breakdown: %s",
-                        exc,
-                    )
-                    self._last_request_metrics = None
-            else:
-                self._last_request_metrics = None
+            self._last_request_metrics = None
+            self._last_tool_message_heat_sidecar = dict(final_message_heat_by_index)
 
             if self._unified_input_engine:
                 try:
@@ -7100,6 +7287,16 @@ class AIAgent:
                     )
                     api_messages = engine_payload.api_messages
                     self._last_context_metrics = input_assembly.context_metrics
+                    final_message_heat_by_index = self._align_tool_heat_to_final_messages(
+                        request_messages,
+                        raw_message_heat_by_index,
+                        self._conversation_segment_for_metrics(
+                            api_messages,
+                            effective_system=effective_system,
+                            prefill_messages=self.prefill_messages,
+                        ),
+                    )
+                    self._last_tool_message_heat_sidecar = dict(final_message_heat_by_index)
                 except Exception as exc:
                     logger.warning(
                         "Unified input engine failed; falling back to legacy request assembly: %s",
@@ -7151,6 +7348,23 @@ class AIAgent:
                             "Unified input shadow compare failed; continuing with legacy payload: %s",
                             exc,
                         )
+
+            if input_assembly is not None:
+                try:
+                    self._last_request_metrics = self._build_final_request_metrics(
+                        input_assembly=input_assembly,
+                        final_api_messages=api_messages,
+                        effective_system=effective_system,
+                        prefill_messages=self.prefill_messages,
+                        original_request_messages=request_messages,
+                        original_message_heat_by_index=raw_message_heat_by_index,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Unified input request metrics failed; continuing without request breakdown: %s",
+                        exc,
+                    )
+                    self._last_request_metrics = None
 
             self.context_compressor.last_prompt_tokens = estimate_request_tokens_rough(
                 api_messages,

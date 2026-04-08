@@ -9,6 +9,7 @@ from agent.context_engine import (
     InputAssembly,
     get_transport_adapter,
 )
+from agent.context_engine.tool_compaction import ShapedToolHistory
 
 
 def _make_agent(*, api_mode="chat_completions", model="openai/gpt-4.1", base_url="https://openrouter.ai/api/v1"):
@@ -238,7 +239,6 @@ class TestTransportAdapterEquivalence:
             ],
         )
         adapter = ChatCompletionsTransportAdapter()
-
         actual = adapter.build_api_messages(assembly, agent)
 
         assert actual[:4] == [
@@ -248,6 +248,34 @@ class TestTransportAdapterEquivalence:
             {"role": "user", "content": "live"},
         ]
         assert actual == _legacy_api_messages(agent, assembly)
+
+    def test_transport_payload_does_not_include_tool_heat_metadata(self):
+        agent = _make_agent(api_mode="chat_completions")
+        assembly = InputAssembly(
+            normalized_messages=[
+                {"role": "assistant", "content": "call", "tool_calls": [{"id": "call_1"}]},
+                {"role": "tool", "content": "trimmed", "tool_call_id": "call_1"},
+            ],
+            tool_compaction_snapshot=ShapedToolHistory(
+                shaped_messages=[
+                    {"role": "assistant", "content": "call", "tool_calls": [{"id": "call_1"}]},
+                    {"role": "tool", "content": "trimmed", "tool_call_id": "call_1"},
+                ],
+                hot_groups=[],
+                warm_groups=[],
+                cold_groups=[],
+                message_heat_by_index={1: "warm"},
+            ),
+        )
+        adapter = ChatCompletionsTransportAdapter()
+        api_messages = adapter.build_api_messages(assembly, agent)
+
+        assert api_messages == [
+            {"role": "assistant", "content": "call", "tool_calls": [{"id": "call_1"}]},
+            {"role": "tool", "content": "trimmed", "tool_call_id": "call_1"},
+        ]
+        assert "_tool_heat" not in api_messages[1]
+        assert "heat" not in api_messages[1]
 
     def test_strict_field_stripping_hook_matches_legacy(self):
         agent = _make_agent(

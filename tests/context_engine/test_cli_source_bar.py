@@ -23,7 +23,8 @@ class TestSourceColorLabels:
             "context_skills", "context_project", "context_time_platform",
             "context_ephemeral", "context_plugin", "context_sparkgraph_recall",
             "context_honcho_turn", "messages_user", "messages_assistant",
-            "messages_tool", "messages_other", "prefill_messages",
+            "messages_tool", "messages_tool_hot", "messages_tool_warm",
+            "messages_tool_cold", "messages_other", "prefill_messages",
             "tool_schemas",
         }
         assert set(_SOURCE_COLORS.keys()) == expected_sources
@@ -41,7 +42,8 @@ class TestSourceColorLabels:
             "context_skills", "context_project", "context_time_platform",
             "context_ephemeral", "context_plugin", "context_sparkgraph_recall",
             "context_honcho_turn", "messages_user", "messages_assistant",
-            "messages_tool", "messages_other", "prefill_messages",
+            "messages_tool", "messages_tool_hot", "messages_tool_warm",
+            "messages_tool_cold", "messages_other", "prefill_messages",
             "tool_schemas",
         }
         assert set(_SOURCE_LABELS.keys()) == expected_sources
@@ -228,7 +230,7 @@ class TestRenderSourceBar:
         cli = self._make_cli()
         metrics = MockRequestMetrics(
             [
-                MockRequestBucketMetrics("messages_tool", 60, 240),
+                MockRequestBucketMetrics("messages_tool_hot", 60, 240),
                 MockRequestBucketMetrics("context_project", 30, 120),
                 MockRequestBucketMetrics("tool_schemas", 10, 40),
             ],

@@ -4,6 +4,8 @@ import pytest
 
 from agent.context_engine import InputAssembly, InputNode
 from agent.context_engine.models import ContextChunk
+from agent.context_engine.tool_compaction import ShapedToolHistory
+from agent.context_engine.tool_groups import ToolGroup
 
 
 def _make_chunk(source="project_context", stage="stable", content="hello world"):
@@ -138,3 +140,36 @@ class TestInputAssembly:
         assert metrics.get_bucket("messages_user") is not None
         assert metrics.get_bucket("prefill_messages") is not None
         assert metrics.get_bucket("tool_schemas") is not None
+
+    def test_request_metrics_use_tool_compaction_sidecar_when_present(self):
+        snapshot = ShapedToolHistory(
+            shaped_messages=[{"role": "tool", "content": "trimmed", "tool_call_id": "call_1"}],
+            hot_groups=[
+                ToolGroup(
+                    turn_index=1,
+                    assistant_index=0,
+                    tool_start_index=1,
+                    tool_end_index=1,
+                    assistant_message={"role": "assistant", "tool_calls": [{"id": "call_1"}]},
+                    tool_messages=[{"role": "tool", "content": "trimmed", "tool_call_id": "call_1"}],
+                    char_count=7,
+                )
+            ],
+            warm_groups=[],
+            cold_groups=[],
+            message_heat_by_index={0: "hot"},
+        )
+        assembly = InputAssembly(
+            request_nodes=[InputNode(
+                kind="message",
+                name="messages_tool",
+                stage="request",
+                content={"role": "tool", "content": "trimmed", "tool_call_id": "call_1"},
+            )],
+            normalized_messages=[{"role": "tool", "content": "trimmed", "tool_call_id": "call_1"}],
+            tool_compaction_snapshot=snapshot,
+        )
+
+        metrics = assembly.request_metrics
+
+        assert metrics.get_bucket("messages_tool_hot") is not None

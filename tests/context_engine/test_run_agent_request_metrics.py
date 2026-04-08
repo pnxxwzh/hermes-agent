@@ -190,13 +190,13 @@ class TestRunAgentRequestMetrics:
         assert metrics.get_bucket("tool_schemas") is not None
         assert metrics.get_bucket("messages_user") is not None
         assert metrics.get_bucket("messages_assistant") is not None
-        assert metrics.get_bucket("messages_tool") is not None
+        assert metrics.get_bucket("messages_tool_hot") is not None
         assert metrics.total_estimated_tokens >= agent._last_context_metrics.total_estimated_tokens
 
         sent_messages = captured_api_kwargs["messages"]
         tool_messages = [m for m in sent_messages if m.get("role") == "tool"]
         assert tool_messages, "sanitizer should inject a stub tool result"
-        assert metrics.get_bucket("messages_tool").char_count > 0
+        assert metrics.get_bucket("messages_tool_hot").char_count > 0
 
     def test_request_metrics_ignore_cache_control_transport_wrapping(self):
         agent = self._make_agent()

@@ -11,6 +11,18 @@ from agent.context_engine.input_sources import (
     PrefillMessagesSource,
     ToolSchemasSource,
 )
+from agent.context_engine.tool_compaction import (
+    ShapedToolHistory,
+    compact_tool_group,
+    shape_tool_history,
+    truncate_head_tail,
+)
+from agent.context_engine.tool_groups import (
+    ToolCompactionConfig,
+    ToolGroup,
+    apply_tool_heat_budget,
+    build_tool_groups,
+)
 from agent.context_engine.models import (
     AssemblyResult,
     ContextChunk,
@@ -61,6 +73,14 @@ __all__ = [
     "ConversationMessagesSource",
     "PrefillMessagesSource",
     "ToolSchemasSource",
+    "ToolGroup",
+    "ToolCompactionConfig",
+    "ShapedToolHistory",
+    "build_tool_groups",
+    "apply_tool_heat_budget",
+    "truncate_head_tail",
+    "compact_tool_group",
+    "shape_tool_history",
     # Request metrics
     "build_request_metrics",
     "rough_tokens_from_message",

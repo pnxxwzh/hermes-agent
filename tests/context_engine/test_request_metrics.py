@@ -23,6 +23,15 @@ class TestRequestHelpers:
         msg = {"role": "user", "content": "hello"}
         assert rough_tokens_from_message(msg) == len(str(msg)) // 4
 
+    def test_rough_tokens_from_message_ignores_cache_control(self):
+        msg = {
+            "role": "assistant",
+            "content": "hello",
+            "cache_control": {"type": "ephemeral"},
+        }
+        expected = len(str({"role": "assistant", "content": "hello"})) // 4
+        assert rough_tokens_from_message(msg) == expected
+
 
 class TestRequestBucketMetrics:
     """RequestBucketMetrics basics."""
@@ -113,6 +122,20 @@ class TestBuildRequestMetrics:
         assert metrics.get_bucket("messages_tool").char_count == len(str(messages[2]))
         assert metrics.get_bucket("messages_other").char_count == len(str(messages[3]))
 
+    def test_build_request_metrics_classifies_tool_heat_buckets(self):
+        messages = [
+            {"role": "tool", "content": "hot", "tool_call_id": "call_1"},
+            {"role": "tool", "content": "warm", "tool_call_id": "call_2"},
+            {"role": "tool", "content": "cold", "tool_call_id": "call_3"},
+        ]
+        metrics = build_request_metrics(
+            messages=messages,
+            message_heat_by_index={0: "hot", 1: "warm", 2: "cold"},
+        )
+        assert metrics.get_bucket("messages_tool_hot").char_count == len(str(messages[0]))
+        assert metrics.get_bucket("messages_tool_warm").char_count == len(str(messages[1]))
+        assert metrics.get_bucket("messages_tool_cold").char_count == len(str(messages[2]))
+
     def test_build_request_metrics_prefill_is_separate(self):
         prefill = [
             {"role": "user", "content": "few-shot user"},
@@ -156,6 +179,16 @@ class TestBuildRequestMetrics:
         message = {"content": "role missing"}
         metrics = build_request_metrics(messages=[message])
         assert metrics.get_bucket("messages_other").char_count == len(str(message))
+
+    def test_build_request_metrics_ignores_cache_control_in_message_size(self):
+        message = {
+            "role": "assistant",
+            "content": "reply",
+            "cache_control": {"type": "ephemeral"},
+        }
+        metrics = build_request_metrics(messages=[message])
+        expected = len(str({"role": "assistant", "content": "reply"}))
+        assert metrics.get_bucket("messages_assistant").char_count == expected
 
     def test_build_request_metrics_aggregates_duplicate_buckets(self):
         stable = [

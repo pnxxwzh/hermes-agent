@@ -110,6 +110,7 @@ class InputAssembly:
     normalized_messages: list[dict[str, Any]] = field(default_factory=list)
     prefill_messages: list[dict[str, Any]] = field(default_factory=list)
     tool_schemas: list[dict[str, Any]] = field(default_factory=list)
+    tool_compaction_snapshot: Any | None = None
 
     def __post_init__(self) -> None:
         self._validate_stage(self.stable_nodes, expected="stable")
@@ -154,4 +155,9 @@ class InputAssembly:
             prefill_messages=self.prefill_messages,
             tools=self.tool_schemas,
             context_metrics=self.context_metrics,
+            message_heat_by_index=getattr(
+                self.tool_compaction_snapshot,
+                "message_heat_by_index",
+                None,
+            ),
         )

@@ -232,6 +232,17 @@ DEFAULT_CONFIG = {
             "unified_input_engine": False,
             "unified_input_shadow_compare": True,
             "unified_input_compare_fail_fast": False,
+            "tool_compaction": {
+                "enabled": True,
+                "retain_recent_user_turns": 3,
+                "retain_recent_tool_groups_in_turn": 2,
+                "current_turn_tool_budget_chars": 12000,
+                "historical_tool_budget_chars": 24000,
+                "warm_head_chars": 1200,
+                "warm_tail_chars": 400,
+                "cold_head_chars": 400,
+                "cold_tail_chars": 200,
+            },
         },
     },
     

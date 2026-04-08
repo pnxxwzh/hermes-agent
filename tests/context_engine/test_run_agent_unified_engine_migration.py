@@ -3,6 +3,7 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+from agent.context_engine import InputAssembly
 from agent.context_engine.models import ContextChunk, ContextMetrics, SourceMetrics
 from agent.context_engine.transport import TransportPayload
 
@@ -166,9 +167,8 @@ class TestUnifiedEngineMigration:
             captured_api_kwargs.update(api_kwargs)
             return _mock_response("done")
 
-        input_assembly = SimpleNamespace(
-            context_metrics="ctx-metrics",
-            request_metrics="req-metrics",
+        input_assembly = InputAssembly(
+            normalized_messages=[{"role": "user", "content": "hello"}],
         )
 
         with (
@@ -190,8 +190,8 @@ class TestUnifiedEngineMigration:
 
         assert result["completed"] is True
         assert captured_api_kwargs["messages"][0]["content"] == "engine-message"
-        assert result["context_metrics"] == "ctx-metrics"
-        assert result["request_metrics"] == "req-metrics"
+        assert result["context_metrics"] == input_assembly.context_metrics
+        assert result["request_metrics"] is not None
 
     def test_unified_input_engine_falls_back_to_legacy_on_engine_failure(self):
         agent = _make_agent()
