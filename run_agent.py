@@ -6830,7 +6830,8 @@ class AIAgent:
                     )
                 else:
                     self._last_context_metrics = dynamic_result.metrics
-            except Exception:
+            except Exception as exc:
+                logger.warning("Dynamic context assembly failed; falling back to legacy path: %s", exc)
                 dynamic_result = None
 
             if dynamic_result and dynamic_result.effective_system:
@@ -6857,6 +6858,23 @@ class AIAgent:
                     effective_system = (effective_system + "\n\n" + self.ephemeral_system_prompt).strip()
                 if _plugin_turn_context:
                     effective_system = (effective_system + "\n\n" + _plugin_turn_context).strip()
+                if self._honcho:
+                    try:
+                        from agent.context_engine.compat import wrap_honcho_get_turn_context
+
+                        _honcho_system_context, _honcho_err = wrap_honcho_get_turn_context(
+                            self._honcho,
+                            user_message=original_user_message,
+                            conversation_history=messages,
+                        )
+                        if _honcho_err:
+                            logger.warning("Legacy Honcho fallback failed: %s", _honcho_err)
+                        if _honcho_system_context:
+                            effective_system = (
+                                effective_system + "\n\n" + _honcho_system_context
+                            ).strip()
+                    except Exception as exc:
+                        logger.warning("Legacy Honcho fallback crashed: %s", exc)
                 if not _sparkgraph_turn_context and getattr(self, "_sparkgraph_turn_context_ready", False):
                     _sparkgraph_turn_context = getattr(self, "_sparkgraph_turn_context", "") or ""
                 if _sparkgraph_turn_context:

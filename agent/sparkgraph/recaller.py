@@ -144,6 +144,36 @@ def recall_pool_get(session_id: str) -> dict[str, PoolEntry]:
     return _POOLS[session_id]
 
 
+def apply_recall_feedback(
+    store: SparkGraphStore,
+    recalled_nodes: list[dict[str, Any]],
+    *,
+    session_id: str | None = None,
+) -> None:
+    """Persist feedback only for nodes that were actually injected.
+
+    This updates the per-session pool and validated_count after the final
+    prompt block has been trimmed to fit the character budget.
+    """
+    recalled_ids: list[str] = []
+    seen_ids: set[str] = set()
+    for node in recalled_nodes:
+        node_id = str(node.get("id") or "")
+        if not node_id or node_id in seen_ids:
+            continue
+        seen_ids.add(node_id)
+        recalled_ids.append(node_id)
+
+    if session_id:
+        pool = recall_pool_get(session_id)
+        for node in recalled_nodes:
+            _pool_add(pool, node)
+        _pool_refresh(pool, set(recalled_ids))
+
+    if recalled_ids:
+        store.increment_validated_count(list(recalled_ids))
+
+
 # ─── Vector thresholds ───────────────────────────────────────────
 MIN_VECTOR_SIMILARITY = 0.75
 SHORT_QUERY_VECTOR_SIMILARITY = 0.80
@@ -454,7 +484,6 @@ def recall_nodes(
     # _pool_boost marker so they rank above fresh results at equal priority.
     # This implements cross-turn context persistence without overriding
     # genuinely better new matches.
-    pool_refreshed_ids: set[str] = set()
     if pool:
         for node_id, entry in pool.items():
             if node_id in merged:
@@ -464,7 +493,6 @@ def recall_nodes(
                 entry["last_hit"] = time.time()
                 entry["hit_count"] = entry.get("hit_count", 0) + 1
                 entry["node"].update(merged[node_id])
-                pool_refreshed_ids.add(node_id)
             else:
                 # Not found fresh — inject with pool boost (low match_priority=0
                 # but flagged as pool member so sort key lifts it)
@@ -474,8 +502,9 @@ def recall_nodes(
                 node["_pool_hit_count"] = entry.get("hit_count", 0)
                 _merge_hit(merged, node, match_priority=0)
 
-    # ── Channel 2: 图扩展（以精确 top2 为种子） ──────────────────────
-    l1_seeds = list(merged.values())[:2]
+    # ── Channel 2: 图扩展（以当前最佳候选 top2 为种子） ───────────────
+    # Seed selection should reflect current relevance, not insertion order.
+    l1_seeds = _rank_legacy(list(merged.values()))[:2]
     seed_ids = [n["id"] for n in l1_seeds if n.get("id")]
     graph_hits: list[dict[str, Any]] = []
     if seed_ids:
@@ -503,19 +532,6 @@ def recall_nodes(
 
     final = ranked[: config.max_nodes]
     final_ids = {str(n["id"]) for n in final if n.get("id")}
-
-    # ── Session pool update: add newly recalled nodes, refresh recency ─
-    if pool:
-        for node in final:
-            nid = str(node.get("id") or "")
-            if not nid or nid in pool_refreshed_ids:
-                continue
-            _pool_add(pool, node)
-        _pool_refresh(pool, final_ids)
-
-    # ── 命中计数 ─────────────────────────────────────────────────────
-    if final_ids:
-        store.increment_validated_count(list(final_ids))
 
     # ── 取边 ─────────────────────────────────────────────────────────
     edges: list[dict[str, Any]] = []

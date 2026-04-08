@@ -8,6 +8,7 @@ from agent.context_engine.models import ContextChunk
 from agent.context_engine.sources import (
     EphemeralSystemSource,
     PluginTurnContextSource,
+    ProjectContextSource,
     SparkGraphRecallSource,
     HonchoTurnSource,
 )
@@ -170,6 +171,18 @@ class TestPluginTurnContextSource:
             assert len(chunks) == 1
             assert chunks[0].content == "cached plugin context"
 
+    def test_plugin_logs_wrapper_error(self, caplog):
+        agent = MagicMock()
+        with patch(
+            "agent.context_engine.compat.wrap_invoke_pre_llm_call",
+            return_value=("", "plugin failed"),
+        ):
+            caplog.set_level("WARNING")
+            src = PluginTurnContextSource(session_id="s1")
+            chunks = src.collect(AssemblyContext(agent=agent, user_message="hello"))
+        assert chunks == []
+        assert "Context source 'plugin' failed: plugin failed" in caplog.text
+
 
 class TestSparkGraphRecallSource:
     """T8: SparkGraphRecallSource."""
@@ -232,6 +245,33 @@ class TestSparkGraphRecallSource:
         )
         chunks = src.collect(AssemblyContext(agent=MagicMock()))
         assert chunks == []
+
+    def test_sparkgraph_logs_wrapper_error(self, caplog):
+        src = SparkGraphRecallSource(
+            sparkgraph_manager=MagicMock(),
+            sparkgraph_enabled=True,
+        )
+        with patch(
+            "agent.context_engine.compat.wrap_sparkgraph_build_recall",
+            return_value=("", "recall failed"),
+        ):
+            caplog.set_level("WARNING")
+            chunks = src.collect(AssemblyContext(agent=MagicMock()))
+        assert chunks == []
+        assert "Context source 'sparkgraph_recall' failed: recall failed" in caplog.text
+
+
+class TestProjectContextSource:
+    def test_project_context_logs_wrapper_error(self, caplog):
+        src = ProjectContextSource(cwd="/workspace")
+        with patch(
+            "agent.context_engine.compat.wrap_build_context_files_prompt",
+            return_value=("", "context files failed"),
+        ):
+            caplog.set_level("WARNING")
+            chunks = src.collect(AssemblyContext(agent=MagicMock()))
+        assert chunks == []
+        assert "Context source 'project_context' failed: context files failed" in caplog.text
 
     def test_sparkgraph_user_message_passed(self):
         """T8.x: user_message passed to build_recall_block."""

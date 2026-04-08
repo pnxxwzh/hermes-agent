@@ -420,3 +420,97 @@ class TestDynamicLayerIntegration:
         call_args = agent.client.chat.completions.create.call_args
         api_messages = call_args.kwargs.get("messages") or call_args[1].get("messages")
         assert api_messages[0]["content"] == "STABLE"
+
+    def test_fallback_logs_dynamic_assembly_exception(self):
+        """Assembler failures should be visible in logs before fallback."""
+        from run_agent import AIAgent
+        with patch("run_agent.OpenAI"), \
+             patch("run_agent.get_tool_definitions", return_value=[]), \
+             patch("run_agent.check_toolset_requirements", return_value={}):
+            agent = AIAgent(
+                api_key="test-key",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+
+        agent.client = MagicMock()
+        agent._cached_system_prompt = "STABLE"
+        agent._use_prompt_caching = False
+        agent.tool_delay = 0
+        agent.compression_enabled = False
+        agent.save_trajectories = False
+        agent.client.chat.completions.create.return_value = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="ok", tool_calls=None), finish_reason="stop")],
+            usage=None,
+            model="test/model",
+        )
+
+        mock_assembler = MagicMock()
+        mock_assembler.assemble_dynamic.side_effect = RuntimeError("boom")
+        agent._context_assembler = mock_assembler
+
+        with (
+            patch("run_agent.logger.warning") as mock_warning,
+            patch("hermes_cli.plugins.invoke_hook", return_value=[]),
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("hello")
+
+        assert result["completed"] is True
+        assert any(
+            len(call.args) >= 2
+            and call.args[0] == "Dynamic context assembly failed; falling back to legacy path: %s"
+            and str(call.args[1]) == "boom"
+            for call in mock_warning.call_args_list
+        )
+
+    def test_fallback_includes_honcho_turn_context(self):
+        """Legacy fallback should preserve Honcho dynamic context."""
+        from run_agent import AIAgent
+        with patch("run_agent.OpenAI"), \
+             patch("run_agent.get_tool_definitions", return_value=[]), \
+             patch("run_agent.check_toolset_requirements", return_value={}):
+            agent = AIAgent(
+                api_key="test-key",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+
+        agent.client = MagicMock()
+        agent._cached_system_prompt = "STABLE"
+        agent._use_prompt_caching = False
+        agent.tool_delay = 0
+        agent.compression_enabled = False
+        agent.save_trajectories = False
+        agent._honcho = MagicMock()
+        agent.client.chat.completions.create.return_value = SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content="ok", tool_calls=None), finish_reason="stop")],
+            usage=None,
+            model="test/model",
+        )
+
+        mock_assembler = MagicMock()
+        mock_assembler.assemble_dynamic.side_effect = RuntimeError("boom")
+        agent._context_assembler = mock_assembler
+
+        with (
+            patch("hermes_cli.plugins.invoke_hook", return_value=[]),
+            patch(
+                "agent.context_engine.compat.wrap_honcho_get_turn_context",
+                return_value=("HONCHO TURN", None),
+            ) as mock_honcho_turn,
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+        ):
+            result = agent.run_conversation("hello")
+
+        assert result["completed"] is True
+        mock_honcho_turn.assert_called()
+        call_args = agent.client.chat.completions.create.call_args
+        api_messages = call_args.kwargs.get("messages") or call_args[1].get("messages")
+        assert api_messages[0]["content"] == "STABLE\n\nHONCHO TURN"

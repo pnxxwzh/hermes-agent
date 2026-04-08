@@ -10,9 +10,11 @@ Stable sources (in assembly order):
 
 from __future__ import annotations
 
+import logging
 from typing import Literal
 
 from agent.prompt_builder import (
+    DEFAULT_AGENT_IDENTITY,
     MEMORY_GUIDANCE,
     SESSION_SEARCH_GUIDANCE,
     SKILLS_GUIDANCE,
@@ -26,6 +28,13 @@ from agent.context_engine.compat import (
 )
 from agent.context_engine.context import AssemblyContext
 from agent.context_engine.models import ContextChunk
+
+logger = logging.getLogger(__name__)
+
+
+def _warn_source_error(source: str, err: str | None) -> None:
+    if err:
+        logger.warning("Context source '%s' failed: %s", source, err)
 
 
 # ---------------------------------------------------------------------------
@@ -44,7 +53,7 @@ class IdentitySource:
         ai_peer_name: str | None = None,
         load_soul: bool = True,
     ):
-        self._default = default_identity or "You are Hermes Agent"
+        self._default = default_identity or DEFAULT_AGENT_IDENTITY
         self._ai_peer = ai_peer_name
         self._load_soul = load_soul
 
@@ -229,7 +238,9 @@ class HonchoStaticSource:
         content, err = wrap_honcho_static_block(
             self._manager, self._config, self._ai_peer
         )
-        if not content and not err:
+        if err:
+            _warn_source_error(self.name, err)
+        if not content:
             return []
         return [ContextChunk(
             source="honcho_static",
@@ -409,14 +420,16 @@ class ProjectContextSource:
             cwd=self._cwd or ctx.cwd,
             skip_soul=self._skip_soul,
         )
-        if not content and not err:
+        if err:
+            _warn_source_error(self.name, err)
+        if not content:
             return []
         return [ContextChunk(
             source="project_context",
             stage="stable",
             slot="context_files",
             priority=9,
-            content=content or "",
+            content=content,
         )]
 
 
@@ -574,14 +587,16 @@ class PluginTurnContextSource:
         if agent is not None:
             setattr(agent, "_plugin_turn_context", content or "")
             setattr(agent, "_plugin_turn_context_ready", True)
-        if not content and not err:
+        if err:
+            _warn_source_error(self.name, err)
+        if not content:
             return []
         return [ContextChunk(
             source="plugin",
             stage="dynamic",
             slot="plugin_context",
             priority=2,
-            content=content or "",
+            content=content,
         )]
 
 
@@ -622,8 +637,8 @@ class SparkGraphRecallSource:
             if agent is not None:
                 setattr(agent, "_sparkgraph_turn_context", content or "")
                 setattr(agent, "_sparkgraph_turn_context_ready", True)
-            if not content and not err:
-                return []
+            if err:
+                _warn_source_error(self.name, err)
         if not content:
             return []
         return [ContextChunk(
@@ -631,7 +646,7 @@ class SparkGraphRecallSource:
             stage="dynamic",
             slot="recall",
             priority=3,
-            content=content or "",
+            content=content,
             metadata={"recall_injected": bool(content)},
         )]
 
@@ -658,12 +673,14 @@ class HonchoTurnSource:
             user_message=ctx.user_message or "",
             conversation_history=ctx.conversation_history,
         )
-        if not content and not err:
+        if err:
+            _warn_source_error(self.name, err)
+        if not content:
             return []
         return [ContextChunk(
             source="honcho_turn",
             stage="dynamic",
             slot="honcho_context",
             priority=4,
-            content=content or "",
+            content=content,
         )]

@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from agent.sparkgraph.config import SparkGraphConfig, parse_sparkgraph_config
 from agent.sparkgraph.db import ensure_db_parent
 from agent.sparkgraph.formatter import build_recall_payload
-from agent.sparkgraph.recaller import RecallConfig, recall_nodes
+from agent.sparkgraph.recaller import RecallConfig, apply_recall_feedback, recall_nodes
 from agent.sparkgraph.runtime import SparkGraphRuntimeSnapshot, build_runtime_snapshot
 from agent.sparkgraph.store import SparkGraphStore
 
@@ -65,6 +65,15 @@ class SparkGraphManager:
         )
         if block and included_ids:
             try:
+                included_id_set = set(included_ids)
+                included_nodes = [
+                    node for node in nodes if str(node.get("id") or "") in included_id_set
+                ]
+                apply_recall_feedback(
+                    store,
+                    included_nodes,
+                    session_id=session_id,
+                )
                 store.mark_recalled(included_ids)
             except Exception:
                 pass

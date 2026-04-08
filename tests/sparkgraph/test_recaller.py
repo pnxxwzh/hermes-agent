@@ -82,7 +82,7 @@ class TestRecallNodes:
         nodes, edges, _ = recall_nodes(store, query="proxy pac script")
         assert len(nodes) == 1
         assert nodes[0]["id"] == "n1"
-        store.increment_validated_count.assert_called_once_with(["n1"])
+        store.increment_validated_count.assert_not_called()
 
     def test_graph_expansion_includes_active_neighbors(self):
         """TC-R-02: 图扩展包含 1-hop active 邻居。"""
