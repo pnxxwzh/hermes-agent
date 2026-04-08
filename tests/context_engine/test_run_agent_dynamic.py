@@ -467,8 +467,8 @@ class TestDynamicLayerIntegration:
             for call in mock_warning.call_args_list
         )
 
-    def test_fallback_includes_honcho_turn_context(self):
-        """Legacy fallback should preserve Honcho dynamic context."""
+    def test_fallback_keeps_honcho_turn_context_out_of_system_prompt(self):
+        """Honcho turn context should stay on the user-message path only."""
         from run_agent import AIAgent
         with patch("run_agent.OpenAI"), \
              patch("run_agent.get_tool_definitions", return_value=[]), \
@@ -487,6 +487,8 @@ class TestDynamicLayerIntegration:
         agent.compression_enabled = False
         agent.save_trajectories = False
         agent._honcho = MagicMock()
+        agent._honcho_config = SimpleNamespace(recall_mode="hybrid")
+        agent._honcho_session_key = "sess-1"
         agent.client.chat.completions.create.return_value = SimpleNamespace(
             choices=[SimpleNamespace(message=SimpleNamespace(content="ok", tool_calls=None), finish_reason="stop")],
             usage=None,
@@ -499,18 +501,19 @@ class TestDynamicLayerIntegration:
 
         with (
             patch("hermes_cli.plugins.invoke_hook", return_value=[]),
-            patch(
-                "agent.context_engine.compat.wrap_honcho_get_turn_context",
-                return_value=("HONCHO TURN", None),
-            ) as mock_honcho_turn,
+            patch.object(agent, "_honcho_prefetch", return_value="USER-MESSAGE HONCHO"),
             patch.object(agent, "_persist_session"),
             patch.object(agent, "_save_trajectory"),
             patch.object(agent, "_cleanup_task_resources"),
         ):
-            result = agent.run_conversation("hello")
+            result = agent.run_conversation(
+                "hello",
+                conversation_history=[{"role": "user", "content": "before"}],
+            )
 
         assert result["completed"] is True
-        mock_honcho_turn.assert_called()
         call_args = agent.client.chat.completions.create.call_args
         api_messages = call_args.kwargs.get("messages") or call_args[1].get("messages")
-        assert api_messages[0]["content"] == "STABLE\n\nHONCHO TURN"
+        assert api_messages[0]["content"] == "STABLE"
+        assert api_messages[1]["content"] == "before"
+        assert "USER-MESSAGE HONCHO" in api_messages[2]["content"]

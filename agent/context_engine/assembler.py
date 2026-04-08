@@ -196,7 +196,6 @@ DYNAMIC_FACTORIES = [
     ("ephemeral", _ephemeral_factory),
     ("plugin", _plugin_factory),
     ("sparkgraph_recall", _sparkgraph_factory),
-    ("honcho_turn", _honcho_turn_factory),
 ]
 
 

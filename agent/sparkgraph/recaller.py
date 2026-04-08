@@ -436,6 +436,7 @@ def recall_nodes(
     config: RecallConfig | None = None,
     embedding_config: SparkGraphEmbeddingConfig | None = None,
     session_id: str | None = None,
+    persist_feedback: bool = True,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
     """三条通道召回：explicit优先 + 精确（FTS+向量）+ 图扩展（1-hop）。
 
@@ -487,11 +488,9 @@ def recall_nodes(
     if pool:
         for node_id, entry in pool.items():
             if node_id in merged:
-                # Already found fresh — update pool entry recency and hit_count
-                # (but do NOT call _pool_add here to avoid double-incrementing
-                # hit_count when we process merged nodes in the final loop)
-                entry["last_hit"] = time.time()
-                entry["hit_count"] = entry.get("hit_count", 0) + 1
+                # Already found fresh — refresh the cached node payload, but defer
+                # hit_count / validated_count updates until feedback is applied to
+                # the final injected set.
                 entry["node"].update(merged[node_id])
             else:
                 # Not found fresh — inject with pool boost (low match_priority=0
@@ -546,5 +545,12 @@ def recall_nodes(
         len(str(n.get("summary", ""))) + len(str(n.get("detail", "")))
         for n in final
     ) / 3)
+
+    if persist_feedback and final:
+        apply_recall_feedback(
+            store,
+            final,
+            session_id=session_id,
+        )
 
     return final, edges, token_estimate

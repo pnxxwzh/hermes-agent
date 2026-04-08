@@ -57,6 +57,7 @@ class SparkGraphManager:
             ),
             embedding_config=self.config.embedding,
             session_id=session_id,
+            persist_feedback=False,
         )
         block, included_ids = build_recall_payload(
             nodes,

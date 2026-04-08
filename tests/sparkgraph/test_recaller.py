@@ -82,7 +82,7 @@ class TestRecallNodes:
         nodes, edges, _ = recall_nodes(store, query="proxy pac script")
         assert len(nodes) == 1
         assert nodes[0]["id"] == "n1"
-        store.increment_validated_count.assert_not_called()
+        store.increment_validated_count.assert_called_once_with(["n1"])
 
     def test_graph_expansion_includes_active_neighbors(self):
         """TC-R-02: 图扩展包含 1-hop active 邻居。"""
@@ -157,6 +157,24 @@ class TestRecallNodes:
         store.increment_validated_count = MagicMock()
 
         recall_nodes(store, query="")
+        store.increment_validated_count.assert_not_called()
+
+    def test_persist_feedback_can_be_disabled(self):
+        """Manager path can defer feedback until post-trim inclusion is known."""
+        store = MagicMock()
+        store.search_nodes.return_value = [self._make_node("n1", "proxy pac script")]
+        store.list_vector_nodes.return_value = []
+        store.get_related_nodes.return_value = []
+        store.get_edges_for_nodes.return_value = []
+        store.increment_validated_count = MagicMock()
+
+        nodes, _, _ = recall_nodes(
+            store,
+            query="proxy pac script",
+            persist_feedback=False,
+        )
+
+        assert [node["id"] for node in nodes] == ["n1"]
         store.increment_validated_count.assert_not_called()
 
     def test_recall_returns_token_estimate(self):

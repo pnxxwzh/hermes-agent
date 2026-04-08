@@ -16,7 +16,7 @@ def test_build_recall_block_only_updates_included_nodes(tmp_path):
     ]
 
     with (
-        patch("agent.sparkgraph.manager.recall_nodes", return_value=(recalled_nodes, [], 12)),
+        patch("agent.sparkgraph.manager.recall_nodes", return_value=(recalled_nodes, [], 12)) as mock_recall,
         patch(
             "agent.sparkgraph.manager.build_recall_payload",
             return_value=("[SparkGraph Recall]\n- [FACT] first", ["n1"]),
@@ -32,4 +32,5 @@ def test_build_recall_block_only_updates_included_nodes(tmp_path):
         [{"id": "n1", "summary": "first"}],
         session_id="sess-1",
     )
+    assert mock_recall.call_args.kwargs["persist_feedback"] is False
     store.mark_recalled.assert_called_once_with(["n1"])
