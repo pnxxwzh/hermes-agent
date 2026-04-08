@@ -489,8 +489,8 @@ class TestRecallNodesWithPool:
         finally:
             recall_pool_clear(session_id)
 
-    def test_pool_node_ranked_above_low_priority_fresh_node(self):
-        """TC-SP-11: 池节点优先级高于新鲜的低优先级节点"""
+    def test_pool_node_only_breaks_ties_against_fresh_node(self):
+        """TC-SP-11: pool boost 仅用于打破接近分数的平局，不应压过直接新命中。"""
         from unittest.mock import MagicMock
         from agent.sparkgraph.recaller import recall_pool_clear, recall_pool_get, recall_nodes
         import time
@@ -498,7 +498,6 @@ class TestRecallNodesWithPool:
         try:
             pool = recall_pool_get(session_id)
             now = time.time()
-            # Pool node with multiple hits — should outrank a fresh low-priority node
             pool_node = self._make_node("pool_n1", "previous session context", validated_count=0)
             from agent.sparkgraph.recaller import PoolEntry
             pool["pool_n1"] = PoolEntry({
@@ -506,17 +505,18 @@ class TestRecallNodesWithPool:
             })
 
             store = MagicMock()
-            # Fresh FTS match with low priority
-            store.search_nodes.return_value = [self._make_node("fresh_n1", "new unrelated", validated_count=0)]
+            store.search_nodes.return_value = [
+                self._make_node("fresh_n1", "something unrelated exact", validated_count=0)
+            ]
             store.list_vector_nodes.return_value = []
             store.get_related_nodes.return_value = []
             store.get_edges_for_nodes.return_value = []
             store.increment_validated_count = MagicMock()
 
-            nodes, _, _ = recall_nodes(store, query="something unrelated", session_id=session_id)
-            # pool_n1 should be ranked first due to pool boost
-            assert len(nodes) >= 1
-            assert nodes[0]["id"] == "pool_n1"
+            nodes, _, _ = recall_nodes(store, query="something unrelated exact", session_id=session_id)
+            assert len(nodes) >= 2
+            assert nodes[0]["id"] == "fresh_n1"
+            assert nodes[1]["id"] == "pool_n1"
         finally:
             recall_pool_clear(session_id)
 

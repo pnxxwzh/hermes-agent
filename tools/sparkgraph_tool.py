@@ -165,6 +165,10 @@ _EDGE_ELIGIBLE_TYPES = {
     NodeType.RESOURCE,
     NodeType.DECISION,
 }
+_SYMMETRIC_EDGE_TYPES = {
+    EdgeType.RELATED_TO,
+    EdgeType.CONFLICTS_WITH,
+}
 _MIN_RELATED_SIMILARITY = 0.42
 _MIN_ANCHORED_SIMILARITY = 0.14
 
@@ -444,8 +448,11 @@ def _insert_llm_extracted_edges(
             else:
                 continue  # 真正的 self-loop，跳过
 
-        # pair 去重（无向化，但保留 edge_type 以支持多类型）
-        pair = tuple(sorted((from_id, to_id))) + (edge_type,)
+        # 仅对对称关系做无向去重；方向敏感关系必须保留 A→B 与 B→A。
+        if edge_type in _SYMMETRIC_EDGE_TYPES:
+            pair = tuple(sorted((from_id, to_id))) + (edge_type,)
+        else:
+            pair = (from_id, to_id, edge_type)
         if pair in seen_pairs:
             continue
 
@@ -578,11 +585,18 @@ def sparkgraph_record_tool(
             )
             # keep = cross_type_existing（已有节点，保留），merge = new_node_id（新节点，合并入 keep）
             store.merge_nodes(keep_id=cross_type_existing.node_id, merge_id=new_node_id)
+            store.update_node_scoring(
+                cross_type_existing.node_id,
+                confidence=score_result.confidence,
+                status=score_result.initial_status.value,
+                confidence_components=None,
+                detail=evidence,
+            )
             if embedding_enabled(embedding_config):
                 try:
                     vector = create_embedding(summary, embedding_config)
                     store.upsert_vector(
-                        node_id=new_node_id,
+                        node_id=cross_type_existing.node_id,
                         content_hash=embedding_content_hash(summary),
                         embedding=vector,
                     )

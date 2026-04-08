@@ -362,7 +362,7 @@ def _rank_legacy(
         from_pool = float(bool(node.get("_from_pool")))
         pool_lrfu = float(node.get("_pool_lrfu") or 0.0)
         base = _sort_key(node)
-        return (from_pool, pool_lrfu, match_priority, priority, lexical, base[1], base[2])
+        return (match_priority, priority, lexical, from_pool, pool_lrfu, base[0], base[1], base[2])
     return sorted(nodes, key=_pool_sort_key, reverse=True)
 
 

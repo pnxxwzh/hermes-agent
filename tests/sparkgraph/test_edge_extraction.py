@@ -196,10 +196,18 @@ class TestInsertLlmExtractedEdges:
     def test_insert_edges_order_independent(self, store_with_nodes):
         store, ids = store_with_nodes
         edges = [
-            {"from": ids[0], "to": ids[1], "type": "SOLVES"},
-            {"from": ids[1], "to": ids[0], "type": "SOLVES"},  # reversed direction
+            {"from": ids[0], "to": ids[1], "type": "RELATED_TO"},
+            {"from": ids[1], "to": ids[0], "type": "RELATED_TO"},  # symmetric reverse
         ]
         assert _insert_llm_extracted_edges(edges, ids, store) == 1
+
+    def test_insert_directional_edges_keep_both_directions(self, store_with_nodes):
+        store, ids = store_with_nodes
+        edges = [
+            {"from": ids[0], "to": ids[1], "type": "DEPENDS_ON"},
+            {"from": ids[1], "to": ids[0], "type": "DEPENDS_ON"},
+        ]
+        assert _insert_llm_extracted_edges(edges, ids, store) == 2
 
     def test_insert_edges_mixed_valid_invalid(self, store_with_nodes):
         store, ids = store_with_nodes
@@ -443,3 +451,35 @@ class TestRealDbEdgeInsertion:
         )
         result = json.loads(tool_result)
         assert result["llm_edges_created"] == 1
+
+    def test_cross_type_dedup_refreshes_kept_node_detail(self, store):
+        import json
+
+        existing_id = store.insert_node(
+            SparkGraphNodeInput(
+                type=NodeType.ISSUE,
+                summary="docker compose proxy issue",
+                detail="old evidence",
+                canonical_key="issue:docker-compose-proxy-issue",
+                source_kind="flush",
+            )
+        )
+
+        tool_result = sparkgraph_record_tool(
+            items=[
+                {
+                    "summary": "docker compose proxy issue",
+                    "type": "FACT",
+                    "evidence": "new evidence from fact path",
+                }
+            ],
+            store=store,
+            session_id="test-session",
+            turn_index=1,
+            source_kind="flush",
+        )
+        result = json.loads(tool_result)
+        assert result["updated"] == 1
+
+        kept = store.get_node(existing_id)
+        assert kept["detail"] == "new evidence from fact path"
