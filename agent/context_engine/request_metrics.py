@@ -51,13 +51,21 @@ def _bucket_for_context_source(source: str) -> str:
     return f"{_CONTEXT_BUCKET_PREFIX}{source}"
 
 
-def _bucket_for_message(message: dict[str, Any], *, heat: str | None = None) -> str:
+def _bucket_for_message(
+    message: dict[str, Any],
+    *,
+    heat: str | None = None,
+    persistence: str | None = None,
+) -> str:
     role = str(message.get("role", "") or "").strip().lower()
     if role == "user":
         return "messages_user"
     if role == "assistant":
         return "messages_assistant"
     if role == "tool":
+        normalized_persistence = str(persistence or "").strip().lower()
+        if normalized_persistence in {"persisted_preview", "persisted_budget"}:
+            return "messages_tool_persisted"
         normalized_heat = str(heat or "").strip().lower()
         if normalized_heat == "warm":
             return "messages_tool_warm"
@@ -108,6 +116,7 @@ def build_request_metrics(
     tools: list[dict[str, Any]] | None = None,
     context_metrics: ContextMetrics | None = None,
     message_heat_by_index: dict[int, str] | None = None,
+    message_persistence_by_index: dict[int, str] | None = None,
 ) -> RequestMetrics:
     """Build request-level metrics from context chunks and request payload buckets."""
 
@@ -159,8 +168,13 @@ def build_request_metrics(
         )
 
     for idx, message in enumerate(messages or []):
+        bucket_name = _bucket_for_message(
+            message,
+            heat=(message_heat_by_index or {}).get(idx),
+            persistence=(message_persistence_by_index or {}).get(idx),
+        )
         add_bucket(
-            _bucket_for_message(message, heat=(message_heat_by_index or {}).get(idx)),
+            bucket_name,
             char_count=_safe_len(_message_metric_view(message)),
             category="messages",
         )

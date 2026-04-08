@@ -158,6 +158,7 @@ class TestInputAssembly:
             warm_groups=[],
             cold_groups=[],
             message_heat_by_index={0: "hot"},
+            message_persistence_by_index={0: "inline"},
         )
         assembly = InputAssembly(
             request_nodes=[InputNode(

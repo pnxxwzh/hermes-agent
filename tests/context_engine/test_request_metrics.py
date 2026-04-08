@@ -136,6 +136,20 @@ class TestBuildRequestMetrics:
         assert metrics.get_bucket("messages_tool_warm").char_count == len(str(messages[1]))
         assert metrics.get_bucket("messages_tool_cold").char_count == len(str(messages[2]))
 
+    def test_build_request_metrics_classifies_persisted_tool_bucket(self):
+        message = {
+            "role": "tool",
+            "content": "<persisted-output>\npreview\n</persisted-output>",
+            "tool_call_id": "call_1",
+        }
+        metrics = build_request_metrics(
+            messages=[message],
+            message_heat_by_index={0: "warm"},
+            message_persistence_by_index={0: "persisted_preview"},
+        )
+        assert metrics.get_bucket("messages_tool_persisted").char_count == len(str(message))
+        assert metrics.get_bucket("messages_tool_warm") is None
+
     def test_build_request_metrics_prefill_is_separate(self):
         prefill = [
             {"role": "user", "content": "few-shot user"},

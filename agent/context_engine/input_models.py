@@ -160,4 +160,9 @@ class InputAssembly:
                 "message_heat_by_index",
                 None,
             ),
+            message_persistence_by_index=getattr(
+                self.tool_compaction_snapshot,
+                "message_persistence_by_index",
+                None,
+            ),
         )

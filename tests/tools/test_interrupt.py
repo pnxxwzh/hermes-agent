@@ -89,6 +89,7 @@ class TestPreToolCheck:
         agent._interrupt_requested = True
         agent.log_prefix = ""
         agent._persist_session = MagicMock()
+        agent._tool_persistence_section = {"enabled": False}
 
         # Import and call the method
         import types
@@ -96,6 +97,11 @@ class TestPreToolCheck:
         # Bind the real methods to our mock so dispatch works correctly
         agent._execute_tool_calls_sequential = types.MethodType(AIAgent._execute_tool_calls_sequential, agent)
         agent._execute_tool_calls_concurrent = types.MethodType(AIAgent._execute_tool_calls_concurrent, agent)
+        agent._get_tool_persistence_config = types.MethodType(AIAgent._get_tool_persistence_config, agent)
+        agent._finalize_tool_turn_messages = types.MethodType(AIAgent._finalize_tool_turn_messages, agent)
+        agent._apply_budget_warning_to_tool_messages = (
+            AIAgent._apply_budget_warning_to_tool_messages
+        )
         AIAgent._execute_tool_calls(agent, assistant_msg, messages, "default")
 
         # All 3 should be skipped

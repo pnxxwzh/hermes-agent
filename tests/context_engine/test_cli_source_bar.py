@@ -24,7 +24,8 @@ class TestSourceColorLabels:
             "context_ephemeral", "context_plugin", "context_sparkgraph_recall",
             "context_honcho_turn", "messages_user", "messages_assistant",
             "messages_tool", "messages_tool_hot", "messages_tool_warm",
-            "messages_tool_cold", "messages_other", "prefill_messages",
+            "messages_tool_cold", "messages_tool_persisted",
+            "messages_other", "prefill_messages",
             "tool_schemas",
         }
         assert set(_SOURCE_COLORS.keys()) == expected_sources
@@ -43,7 +44,8 @@ class TestSourceColorLabels:
             "context_ephemeral", "context_plugin", "context_sparkgraph_recall",
             "context_honcho_turn", "messages_user", "messages_assistant",
             "messages_tool", "messages_tool_hot", "messages_tool_warm",
-            "messages_tool_cold", "messages_other", "prefill_messages",
+            "messages_tool_cold", "messages_tool_persisted",
+            "messages_other", "prefill_messages",
             "tool_schemas",
         }
         assert set(_SOURCE_LABELS.keys()) == expected_sources
@@ -240,6 +242,22 @@ class TestRenderSourceBar:
         assert "msg:tool:60%" in result
         assert "project:30%" in result
         assert "tools:10%" in result
+
+    def test_render_source_bar_supports_persisted_tool_bucket(self):
+        """Persisted tool previews render with the dedicated label."""
+        cli = self._make_cli()
+        metrics = MockRequestMetrics(
+            [
+                MockRequestBucketMetrics("messages_tool_persisted", 60, 240),
+                MockRequestBucketMetrics("context_project", 25, 100),
+                MockRequestBucketMetrics("tool_schemas", 15, 60),
+            ],
+            total_estimated_tokens=100,
+        )
+        result = cli._render_source_bar(metrics)
+        assert "tool:persisted:60%" in result
+        assert "project:25%" in result
+        assert "tools:15%" in result
 
 
 class TestRenderContextBreakdown:

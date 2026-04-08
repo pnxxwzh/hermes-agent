@@ -259,6 +259,30 @@ class TestCheckFnExceptionHandling:
         assert any(u["name"] == "crashes" for u in unavailable)
 
 
+class TestMaxResultSize:
+    def test_returns_registered_max_result_size(self):
+        reg = ToolRegistry()
+        reg.register(
+            name="bounded",
+            toolset="core",
+            schema=_make_schema("bounded"),
+            handler=_dummy_handler,
+            max_result_size=2048,
+        )
+        assert reg.get_max_result_size("bounded") == 2048
+
+    def test_returns_default_for_unknown_or_unset_tool(self):
+        reg = ToolRegistry()
+        reg.register(
+            name="plain",
+            toolset="core",
+            schema=_make_schema("plain"),
+            handler=_dummy_handler,
+        )
+        assert reg.get_max_result_size("plain", default=1234) == 1234
+        assert reg.get_max_result_size("missing", default=5678) == 5678
+
+
 class TestEmojiMetadata:
     """Verify per-tool emoji registration and lookup."""
 

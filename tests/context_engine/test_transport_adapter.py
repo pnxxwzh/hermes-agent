@@ -265,6 +265,7 @@ class TestTransportAdapterEquivalence:
                 warm_groups=[],
                 cold_groups=[],
                 message_heat_by_index={1: "warm"},
+                message_persistence_by_index={1: "inline"},
             ),
         )
         adapter = ChatCompletionsTransportAdapter()

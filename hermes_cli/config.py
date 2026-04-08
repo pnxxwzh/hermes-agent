@@ -231,6 +231,13 @@ DEFAULT_CONFIG = {
             "unified_input_engine": False,
             "unified_input_shadow_compare": True,
             "unified_input_compare_fail_fast": False,
+            "tool_persistence": {
+                "enabled": True,
+                "default_result_size_chars": 100000,
+                "turn_budget_chars": 200000,
+                "preview_size_chars": 1500,
+                "tool_overrides": {},
+            },
             "tool_compaction": {
                 "enabled": True,
                 "retain_recent_user_turns": 3,

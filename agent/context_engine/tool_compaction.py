@@ -12,6 +12,7 @@ from agent.context_engine.tool_groups import (
     apply_tool_heat_budget,
     build_tool_groups,
 )
+from tools.tool_result_storage import is_persisted_output
 
 
 def _coerce_text(value: Any) -> str:
@@ -58,11 +59,15 @@ def compact_tool_group(
     compacted: list[dict[str, Any]] = []
     for message in group.tool_messages:
         compacted_message = dict(message)
-        compacted_message["content"] = truncate_head_tail(
-            _coerce_text(message.get("content")),
-            head_chars=head_chars,
-            tail_chars=tail_chars,
-        )
+        content = _coerce_text(message.get("content"))
+        if is_persisted_output(content):
+            compacted_message["content"] = content
+        else:
+            compacted_message["content"] = truncate_head_tail(
+                content,
+                head_chars=head_chars,
+                tail_chars=tail_chars,
+            )
         compacted.append(compacted_message)
     return compacted
 
@@ -76,6 +81,7 @@ class ShapedToolHistory:
     warm_groups: list[ToolGroup]
     cold_groups: list[ToolGroup]
     message_heat_by_index: dict[int, str]
+    message_persistence_by_index: dict[int, str]
 
 
 def shape_tool_history(
@@ -90,12 +96,14 @@ def shape_tool_history(
             warm_groups=[],
             cold_groups=[],
             message_heat_by_index={},
+            message_persistence_by_index={},
         )
 
     groups = apply_tool_heat_budget(build_tool_groups(messages), config)
     group_by_assistant_index = {group.assistant_index: group for group in groups}
     shaped_messages: list[dict[str, Any]] = []
     message_heat_by_index: dict[int, str] = {}
+    message_persistence_by_index: dict[int, str] = {}
     source_idx = 0
     while source_idx < len(messages):
         group = group_by_assistant_index.get(source_idx)
@@ -110,6 +118,11 @@ def shape_tool_history(
         for tool_message in compacted_tool_messages:
             shaped_messages.append(tool_message)
             message_heat_by_index[next_index] = group.heat
+            content = tool_message.get("content")
+            if is_persisted_output(content):
+                message_persistence_by_index[next_index] = "persisted_preview"
+            else:
+                message_persistence_by_index[next_index] = "inline"
             next_index += 1
         source_idx = group.tool_end_index + 1 if group.tool_messages else source_idx + 1
 
@@ -122,4 +135,5 @@ def shape_tool_history(
         warm_groups=warm_groups,
         cold_groups=cold_groups,
         message_heat_by_index=message_heat_by_index,
+        message_persistence_by_index=message_persistence_by_index,
     )

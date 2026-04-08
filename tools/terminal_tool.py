@@ -754,6 +754,14 @@ def get_active_environments_info() -> Dict[str, Any]:
     return info
 
 
+def get_active_environment(task_id: str):
+    """Return the active terminal environment for *task_id*, if any."""
+    if not task_id:
+        return None
+    with _env_lock:
+        return _active_environments.get(task_id)
+
+
 def cleanup_all_environments():
     """Clean up ALL active environments. Use with caution."""
     global _active_environments, _last_activity

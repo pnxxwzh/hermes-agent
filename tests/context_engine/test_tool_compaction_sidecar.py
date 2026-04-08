@@ -42,8 +42,11 @@ class TestToolCompactionSidecar:
         )
 
         assert shaped.message_heat_by_index
+        assert shaped.message_persistence_by_index
         assert all("_tool_heat" not in message for message in shaped.shaped_messages)
         assert all("heat" not in message for message in shaped.shaped_messages)
+        assert all("_tool_persistence" not in message for message in shaped.shaped_messages)
+        assert all("persistence" not in message for message in shaped.shaped_messages)
 
     def test_sanitize_api_messages_with_heat_keeps_sidecar_aligned(self):
         agent = _make_agent()
@@ -76,3 +79,15 @@ class TestToolCompactionSidecar:
         )
 
         assert aligned == {1: "hot"}
+
+    def test_shape_tool_history_marks_non_persisted_tool_messages_inline(self):
+        shaped = shape_tool_history(
+            [
+                {"role": "user", "content": "turn 1"},
+                {"role": "assistant", "content": "call", "tool_calls": [{"id": "call_1"}]},
+                {"role": "tool", "tool_call_id": "call_1", "content": "plain"},
+            ],
+            ToolCompactionConfig(),
+        )
+
+        assert shaped.message_persistence_by_index == {2: "inline"}

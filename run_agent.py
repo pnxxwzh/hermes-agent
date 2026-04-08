@@ -1199,6 +1199,9 @@ class AIAgent:
             _context_engine_section.get("unified_input_compare_fail_fast"),
             False,
         )
+        self._tool_persistence_section = _context_engine_section.get("tool_persistence", {})
+        if not isinstance(self._tool_persistence_section, dict):
+            self._tool_persistence_section = {}
         self._tool_compaction_section = _context_engine_section.get("tool_compaction", {})
         if not isinstance(self._tool_compaction_section, dict):
             self._tool_compaction_section = {}
@@ -1272,6 +1275,7 @@ class AIAgent:
         self._last_request_metrics = None  # cached RequestMetrics from last request build
         self._last_tool_compaction_snapshot = None
         self._last_tool_message_heat_sidecar = None
+        self._last_tool_message_persistence_sidecar = None
         self._user_turn_count = 0
 
         # Cumulative token usage for the session
@@ -1331,6 +1335,7 @@ class AIAgent:
         self._last_request_metrics = None
         self._last_tool_compaction_snapshot = None
         self._last_tool_message_heat_sidecar = None
+        self._last_tool_message_persistence_sidecar = None
 
         # Context compressor internal counters (if present)
         if hasattr(self, "context_compressor") and self.context_compressor:
@@ -3047,6 +3052,129 @@ class AIAgent:
             config.historical_tool_budget_chars = min_cold_budget
         return config
 
+    def _get_tool_persistence_config(self):
+        """Return the normalized tool-result persistence budget config."""
+        from tools.budget_config import BudgetConfig
+
+        section = dict(self._tool_persistence_section or {})
+
+        def _as_bool(value, default):
+            if value is None:
+                return default
+            if isinstance(value, bool):
+                return value
+            return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+        def _as_int(value, default):
+            try:
+                return int(value)
+            except Exception:
+                return int(default)
+
+        tool_overrides = section.get("tool_overrides", {})
+        normalized_overrides: dict[str, int] = {}
+        if isinstance(tool_overrides, dict):
+            for key, value in tool_overrides.items():
+                if not isinstance(key, str) or not key.strip():
+                    continue
+                try:
+                    normalized_overrides[key.strip()] = max(0, int(value))
+                except Exception:
+                    continue
+
+        enabled = _as_bool(section.get("enabled"), True)
+        config = BudgetConfig(
+            default_result_size=max(
+                0,
+                _as_int(section.get("default_result_size_chars"), 100000),
+            ),
+            turn_budget=max(
+                0,
+                _as_int(section.get("turn_budget_chars"), 200000),
+            ),
+            preview_size=max(
+                0,
+                _as_int(section.get("preview_size_chars"), 1500),
+            ),
+            tool_overrides=normalized_overrides,
+        )
+        return enabled, config
+
+    def _get_tool_persistence_env(self, effective_task_id: str):
+        """Return the active execution environment for persistence, if available."""
+        if not effective_task_id:
+            return None
+        try:
+            from tools.terminal_tool import get_active_environment
+
+            return get_active_environment(effective_task_id)
+        except Exception:
+            return None
+
+    def _finalize_tool_turn_messages(
+        self,
+        staged_tool_messages: list[dict[str, Any]],
+        *,
+        effective_task_id: str,
+        persistence_by_tool_call_id: dict[str, str] | None = None,
+    ) -> tuple[list[dict[str, Any]], dict[str, str]]:
+        """Apply per-turn persistence budget to staged tool results."""
+        enabled, config = self._get_tool_persistence_config()
+        if not enabled or not staged_tool_messages:
+            return staged_tool_messages, dict(persistence_by_tool_call_id or {})
+
+        from tools.tool_result_storage import enforce_turn_budget
+
+        return enforce_turn_budget(
+            staged_tool_messages,
+            env=self._get_tool_persistence_env(effective_task_id),
+            config=config,
+            persistence_by_tool_call_id=persistence_by_tool_call_id,
+        )
+
+    def _maybe_persist_tool_result(
+        self,
+        *,
+        content: str,
+        tool_name: str,
+        tool_use_id: str,
+        effective_task_id: str,
+    ) -> tuple[str, str]:
+        """Apply per-result persistence policy to a raw tool result."""
+        enabled, config = self._get_tool_persistence_config()
+        if not enabled:
+            return content, "inline"
+
+        from tools.tool_result_storage import maybe_persist_tool_result
+
+        return maybe_persist_tool_result(
+            content=content,
+            tool_name=tool_name,
+            tool_use_id=tool_use_id,
+            env=self._get_tool_persistence_env(effective_task_id),
+            config=config,
+        )
+
+    @staticmethod
+    def _apply_budget_warning_to_tool_messages(
+        tool_messages: list[dict[str, Any]],
+        *,
+        budget_warning: str | None,
+    ) -> None:
+        """Inject budget warning into the last tool result for the current turn."""
+        if not budget_warning or not tool_messages:
+            return
+        last_content = tool_messages[-1].get("content", "")
+        try:
+            parsed = json.loads(last_content)
+            if isinstance(parsed, dict):
+                parsed["_budget_warning"] = budget_warning
+                tool_messages[-1]["content"] = json.dumps(parsed, ensure_ascii=False)
+            else:
+                tool_messages[-1]["content"] = last_content + f"\n\n{budget_warning}"
+        except (json.JSONDecodeError, TypeError):
+            tool_messages[-1]["content"] = str(last_content) + f"\n\n{budget_warning}"
+
     def _shape_messages_for_request(self, messages: list[dict[str, Any]]):
         """Return request-view messages with tool outputs compacted by heat."""
         from agent.context_engine import shape_tool_history
@@ -3055,10 +3183,12 @@ class AIAgent:
         if not config.enabled:
             self._last_tool_compaction_snapshot = None
             self._last_tool_message_heat_sidecar = None
+            self._last_tool_message_persistence_sidecar = None
             return None
         snapshot = shape_tool_history(messages, config)
         self._last_tool_compaction_snapshot = snapshot
         self._last_tool_message_heat_sidecar = dict(snapshot.message_heat_by_index)
+        self._last_tool_message_persistence_sidecar = dict(snapshot.message_persistence_by_index)
         return snapshot
 
     def _build_transport_payload(
@@ -3265,6 +3395,41 @@ class AIAgent:
                 aligned[idx] = "hot"
         return aligned
 
+    @staticmethod
+    def _align_tool_persistence_to_final_messages(
+        original_messages: list[dict[str, Any]],
+        message_persistence_by_index: Dict[int, str] | None,
+        final_messages: list[dict[str, Any]],
+    ) -> Dict[int, str]:
+        persistence_by_index = dict(message_persistence_by_index or {})
+        persistence_by_tool_call_id: Dict[str, list[str]] = {}
+        unnamed_states: list[str] = []
+        for idx, message in enumerate(original_messages):
+            if str(message.get("role", "") or "").strip().lower() != "tool":
+                continue
+            persistence = persistence_by_index.get(idx)
+            if not persistence:
+                continue
+            tool_call_id = str(message.get("tool_call_id", "") or "")
+            if not tool_call_id:
+                unnamed_states.append(persistence)
+                continue
+            persistence_by_tool_call_id.setdefault(tool_call_id, []).append(persistence)
+
+        aligned: Dict[int, str] = {}
+        for idx, message in enumerate(final_messages):
+            if str(message.get("role", "") or "").strip().lower() != "tool":
+                continue
+            tool_call_id = str(message.get("tool_call_id", "") or "")
+            queue = persistence_by_tool_call_id.get(tool_call_id)
+            if queue:
+                aligned[idx] = queue.pop(0)
+            elif not tool_call_id and unnamed_states:
+                aligned[idx] = unnamed_states.pop(0)
+            else:
+                aligned[idx] = "inline"
+        return aligned
+
     def _build_final_request_metrics(
         self,
         *,
@@ -3274,6 +3439,7 @@ class AIAgent:
         prefill_messages: list[dict[str, Any]] | None,
         original_request_messages: list[dict[str, Any]],
         original_message_heat_by_index: Dict[int, str] | None,
+        original_message_persistence_by_index: Dict[int, str] | None,
     ):
         from agent.context_engine import build_request_metrics
 
@@ -3287,7 +3453,13 @@ class AIAgent:
             original_message_heat_by_index,
             final_conversation_messages,
         )
+        final_persistence_by_index = self._align_tool_persistence_to_final_messages(
+            original_request_messages,
+            original_message_persistence_by_index,
+            final_conversation_messages,
+        )
         self._last_tool_message_heat_sidecar = dict(final_heat_by_index)
+        self._last_tool_message_persistence_sidecar = dict(final_persistence_by_index)
         return build_request_metrics(
             stable_chunks=input_assembly.context_chunks("stable"),
             dynamic_chunks=input_assembly.context_chunks("dynamic"),
@@ -3296,6 +3468,7 @@ class AIAgent:
             tools=list(input_assembly.tool_schemas or []),
             context_metrics=input_assembly.context_metrics,
             message_heat_by_index=final_heat_by_index,
+            message_persistence_by_index=final_persistence_by_index,
         )
 
     @staticmethod
@@ -6181,6 +6354,8 @@ class AIAgent:
                 spinner.stop(f"⚡ {completed}/{num_tools} tools completed in {total_dur:.1f}s total")
 
         # ── Post-execution: display per-tool results ─────────────────────
+        staged_tool_messages: list[dict[str, Any]] = []
+        persistence_by_tool_call_id: dict[str, str] = {}
         for i, (tc, name, args) in enumerate(parsed_calls):
             r = results[i]
             if r is None:
@@ -6216,44 +6391,44 @@ class AIAgent:
                 except Exception as cb_err:
                     logging.debug(f"Tool complete callback error: {cb_err}")
 
-            # Truncate oversized results
-            MAX_TOOL_RESULT_CHARS = 100_000
-            if len(function_result) > MAX_TOOL_RESULT_CHARS:
-                original_len = len(function_result)
-                function_result = (
-                    function_result[:MAX_TOOL_RESULT_CHARS]
-                    + f"\n\n[Truncated: tool response was {original_len:,} chars, "
-                    f"exceeding the {MAX_TOOL_RESULT_CHARS:,} char limit]"
-                )
+            function_result = str(function_result)
+            function_result, persistence_state = self._maybe_persist_tool_result(
+                content=function_result,
+                tool_name=name,
+                tool_use_id=tc.id,
+                effective_task_id=effective_task_id,
+            )
+            persistence_by_tool_call_id[tc.id] = persistence_state
 
-            # Append tool result message in order
             tool_msg = {
                 "role": "tool",
                 "content": function_result,
                 "tool_call_id": tc.id,
             }
-            messages.append(tool_msg)
+            staged_tool_messages.append(tool_msg)
 
         # ── Budget pressure injection ────────────────────────────────────
         budget_warning = self._get_budget_warning(api_call_count)
-        if budget_warning and messages and messages[-1].get("role") == "tool":
-            last_content = messages[-1]["content"]
-            try:
-                parsed = json.loads(last_content)
-                if isinstance(parsed, dict):
-                    parsed["_budget_warning"] = budget_warning
-                    messages[-1]["content"] = json.dumps(parsed, ensure_ascii=False)
-                else:
-                    messages[-1]["content"] = last_content + f"\n\n{budget_warning}"
-            except (json.JSONDecodeError, TypeError):
-                messages[-1]["content"] = last_content + f"\n\n{budget_warning}"
-            if not self.quiet_mode:
-                remaining = self.max_iterations - api_call_count
-                tier = "⚠️  WARNING" if remaining <= self.max_iterations * 0.1 else "💡 CAUTION"
-                print(f"{self.log_prefix}{tier}: {remaining} iterations remaining")
+        staged_tool_messages, persistence_by_tool_call_id = self._finalize_tool_turn_messages(
+            staged_tool_messages,
+            effective_task_id=effective_task_id,
+            persistence_by_tool_call_id=persistence_by_tool_call_id,
+        )
+        self._apply_budget_warning_to_tool_messages(
+            staged_tool_messages,
+            budget_warning=budget_warning,
+        )
+        for tool_msg in staged_tool_messages:
+            messages.append(tool_msg)
+        if budget_warning and staged_tool_messages and not self.quiet_mode:
+            remaining = self.max_iterations - api_call_count
+            tier = "⚠️  WARNING" if remaining <= self.max_iterations * 0.1 else "💡 CAUTION"
+            print(f"{self.log_prefix}{tier}: {remaining} iterations remaining")
 
     def _execute_tool_calls_sequential(self, assistant_message, messages: list, effective_task_id: str, api_call_count: int = 0) -> None:
         """Execute tool calls sequentially (original behavior). Used for single calls or interactive tools."""
+        staged_tool_messages: list[dict[str, Any]] = []
+        persistence_by_tool_call_id: dict[str, str] = {}
         for i, tool_call in enumerate(assistant_message.tool_calls, 1):
             # SAFETY: check interrupt BEFORE starting each tool.
             # If the user sent "stop" during a previous tool's execution,
@@ -6269,7 +6444,8 @@ class AIAgent:
                         "content": f"[Tool execution cancelled — {skipped_name} was skipped due to user interrupt]",
                         "tool_call_id": skipped_tc.id,
                     }
-                    messages.append(skip_msg)
+                    staged_tool_messages.append(skip_msg)
+                    persistence_by_tool_call_id[skipped_tc.id] = "inline"
                 break
 
             function_name = tool_call.function.name
@@ -6490,25 +6666,21 @@ class AIAgent:
                 except Exception as cb_err:
                     logging.debug(f"Tool complete callback error: {cb_err}")
 
-            # Guard against tools returning absurdly large content that would
-            # blow up the context window. 100K chars ≈ 25K tokens — generous
-            # enough for any reasonable tool output but prevents catastrophic
-            # context explosions (e.g. accidental base64 image dumps).
-            MAX_TOOL_RESULT_CHARS = 100_000
-            if len(function_result) > MAX_TOOL_RESULT_CHARS:
-                original_len = len(function_result)
-                function_result = (
-                    function_result[:MAX_TOOL_RESULT_CHARS]
-                    + f"\n\n[Truncated: tool response was {original_len:,} chars, "
-                    f"exceeding the {MAX_TOOL_RESULT_CHARS:,} char limit]"
-                )
+            function_result = str(function_result)
+            function_result, persistence_state = self._maybe_persist_tool_result(
+                content=function_result,
+                tool_name=function_name,
+                tool_use_id=tool_call.id,
+                effective_task_id=effective_task_id,
+            )
+            persistence_by_tool_call_id[tool_call.id] = persistence_state
 
             tool_msg = {
                 "role": "tool",
                 "content": function_result,
                 "tool_call_id": tool_call.id
             }
-            messages.append(tool_msg)
+            staged_tool_messages.append(tool_msg)
 
             if not self.quiet_mode:
                 if self.verbose_logging:
@@ -6528,7 +6700,8 @@ class AIAgent:
                         "content": f"[Tool execution skipped — {skipped_name} was not started. User sent a new message]",
                         "tool_call_id": skipped_tc.id
                     }
-                    messages.append(skip_msg)
+                    staged_tool_messages.append(skip_msg)
+                    persistence_by_tool_call_id[skipped_tc.id] = "inline"
                 break
 
             if self.tool_delay > 0 and i < len(assistant_message.tool_calls):
@@ -6539,21 +6712,21 @@ class AIAgent:
         # approaching max_iterations. If so, inject a warning into the LAST
         # tool result's JSON so the LLM sees it naturally when reading results.
         budget_warning = self._get_budget_warning(api_call_count)
-        if budget_warning and messages and messages[-1].get("role") == "tool":
-            last_content = messages[-1]["content"]
-            try:
-                parsed = json.loads(last_content)
-                if isinstance(parsed, dict):
-                    parsed["_budget_warning"] = budget_warning
-                    messages[-1]["content"] = json.dumps(parsed, ensure_ascii=False)
-                else:
-                    messages[-1]["content"] = last_content + f"\n\n{budget_warning}"
-            except (json.JSONDecodeError, TypeError):
-                messages[-1]["content"] = last_content + f"\n\n{budget_warning}"
-            if not self.quiet_mode:
-                remaining = self.max_iterations - api_call_count
-                tier = "⚠️  WARNING" if remaining <= self.max_iterations * 0.1 else "💡 CAUTION"
-                print(f"{self.log_prefix}{tier}: {remaining} iterations remaining")
+        staged_tool_messages, persistence_by_tool_call_id = self._finalize_tool_turn_messages(
+            staged_tool_messages,
+            effective_task_id=effective_task_id,
+            persistence_by_tool_call_id=persistence_by_tool_call_id,
+        )
+        self._apply_budget_warning_to_tool_messages(
+            staged_tool_messages,
+            budget_warning=budget_warning,
+        )
+        for tool_msg in staged_tool_messages:
+            messages.append(tool_msg)
+        if budget_warning and staged_tool_messages and not self.quiet_mode:
+            remaining = self.max_iterations - api_call_count
+            tier = "⚠️  WARNING" if remaining <= self.max_iterations * 0.1 else "💡 CAUTION"
+            print(f"{self.log_prefix}{tier}: {remaining} iterations remaining")
 
     def _get_budget_warning(self, api_call_count: int) -> Optional[str]:
         """Return a budget pressure string, or None if not yet needed.
@@ -7246,6 +7419,9 @@ class AIAgent:
             raw_message_heat_by_index = (
                 dict(shaped_request.message_heat_by_index) if shaped_request is not None else {}
             )
+            raw_message_persistence_by_index = (
+                dict(shaped_request.message_persistence_by_index) if shaped_request is not None else {}
+            )
             api_messages, final_message_heat_by_index = self._sanitize_api_messages_with_heat(
                 api_messages,
                 raw_message_heat_by_index,
@@ -7274,6 +7450,15 @@ class AIAgent:
 
             self._last_request_metrics = None
             self._last_tool_message_heat_sidecar = dict(final_message_heat_by_index)
+            self._last_tool_message_persistence_sidecar = self._align_tool_persistence_to_final_messages(
+                request_messages,
+                raw_message_persistence_by_index,
+                self._conversation_segment_for_metrics(
+                    api_messages,
+                    effective_system=effective_system,
+                    prefill_messages=self.prefill_messages,
+                ),
+            )
 
             if self._unified_input_engine:
                 try:
@@ -7297,6 +7482,15 @@ class AIAgent:
                         ),
                     )
                     self._last_tool_message_heat_sidecar = dict(final_message_heat_by_index)
+                    self._last_tool_message_persistence_sidecar = self._align_tool_persistence_to_final_messages(
+                        request_messages,
+                        raw_message_persistence_by_index,
+                        self._conversation_segment_for_metrics(
+                            api_messages,
+                            effective_system=effective_system,
+                            prefill_messages=self.prefill_messages,
+                        ),
+                    )
                 except Exception as exc:
                     logger.warning(
                         "Unified input engine failed; falling back to legacy request assembly: %s",
@@ -7358,6 +7552,7 @@ class AIAgent:
                         prefill_messages=self.prefill_messages,
                         original_request_messages=request_messages,
                         original_message_heat_by_index=raw_message_heat_by_index,
+                        original_message_persistence_by_index=raw_message_persistence_by_index,
                     )
                 except Exception as exc:
                     logger.warning(
