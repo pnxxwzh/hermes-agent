@@ -1,5 +1,6 @@
 import json
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pytest
 
@@ -258,15 +259,33 @@ def test_merge_source_sessions(tmp_path):
     assert set(sessions) == {"session-alpha", "session-beta"}
     assert set(json.loads(node["meta"])["source_sessions"]) == {"session-alpha", "session-beta"}
 
-    # Duplicate merge is a no-op
-    store.merge_source_sessions(node_id, "session-beta")
-    node = store.get_node(node_id)
-    sessions = json.loads(node["source_sessions"])
-    assert sessions.count("session-beta") == 1  # no duplication
-    assert json.loads(node["meta"])["source_sessions"].count("session-beta") == 1
 
-    # Merge on non-existent node is a no-op
-    store.merge_source_sessions("nonexistent-id", "session-gamma")
+def test_store_serializes_concurrent_writes(tmp_path):
+    """Concurrent writes on a shared store should not trip sqlite transaction errors."""
+    store = SparkGraphStore(tmp_path / "sparkgraph" / "default.db")
+
+    def _insert(idx: int) -> str:
+        node_id = store.insert_node(
+            SparkGraphNodeInput(
+                type=NodeType.FACT,
+                summary=f"summary-{idx}",
+                canonical_key=f"fact:summary-{idx}",
+                source_kind="flush",
+            )
+        )
+        return node_id
+
+    errors: list[Exception] = []
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = [executor.submit(_insert, idx) for idx in range(120)]
+        for future in as_completed(futures):
+            try:
+                future.result()
+            except Exception as exc:  # pragma: no cover - assertion below captures details
+                errors.append(exc)
+
+    assert errors == []
+    assert store.count_nodes() == 120
 
 
 

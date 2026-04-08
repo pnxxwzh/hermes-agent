@@ -1,17 +1,15 @@
 """Shared fixtures for the hermes-agent test suite."""
 
-# ── Python 3.9 compat + missing-dep compat ─────────────────────────────────────
-# Mock modules that break import due to Python 3.10+ syntax or missing dependencies.
-# Applied at conftest load time (before any test file is imported).
+# ── Missing optional dependency compat ─────────────────────────────────────────
+# Only mock truly optional third-party packages that may be absent in the test
+# environment.  Do NOT mock in-repo modules here: doing so pollutes sys.modules
+# for the entire suite and turns real packages (e.g. tools.registry,
+# tools.web_tools, tools.environments) into MagicMocks, which hides regressions
+# and causes broad false failures under xdist.
 import sys as _sys
 from unittest.mock import MagicMock
 _MOCKS = {
-    # Python 3.10+ union syntax
-    "tools.environments", "tools.environments.base", "tools.environments.singularity",
-    "tools.terminal_tool", "tools.vision_tools", "tools.mixture_of_agents_tool",
-    "tools.image_generation_tool", "tools.web_tools", "tools.registry",
-    "model_tools", "tools.model_tools",
-    # Missing runtime dependencies
+    # Optional third-party dependencies
     "fal_client", "litellm", "anthropic",
 }
 for _m in _MOCKS:

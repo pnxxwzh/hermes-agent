@@ -125,7 +125,7 @@ SPARKGRAPH_SEARCH_SCHEMA = {
             "query": {"type": "string"},
             "status": {
                 "type": "string",
-                "enum": ["candidate", "active", "deprecated"],
+                "enum": ["active", "deprecated"],
             },
             "limit": {
                 "type": "integer",

@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 import sqlite3
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -43,8 +44,10 @@ class SparkGraphStore:
 
     def __init__(self, db_path: Path):
         self.db_path = db_path
+        self._conn_lock = threading.RLock()
         self._conn = connect_db(db_path)
-        initialize_schema(self._conn)
+        with self._conn_lock:
+            initialize_schema(self._conn)
 
     @classmethod
     def from_config(cls, config: SparkGraphConfig) -> "SparkGraphStore":
@@ -55,7 +58,8 @@ class SparkGraphStore:
         return self._conn
 
     def close(self):
-        self._conn.close()
+        with self._conn_lock:
+            self._conn.close()
 
     @staticmethod
     def _meta_with_source_sessions(
@@ -74,33 +78,34 @@ class SparkGraphStore:
         sessions_from_meta = item.meta.get("source_sessions", []) if item.meta else []
         meta_payload = self._meta_with_source_sessions(item.meta, sessions_from_meta)
         source_sessions = json.dumps(sessions_from_meta)
-        self._conn.execute(
-            f"""
-            INSERT INTO {NODES_TABLE} (
-                id, type, summary, detail, status, confidence,
-                source_kind, canonical_key, meta, source_sessions, default_inject,
-                created_at, updated_at, last_recalled_at, validated_count
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                node_id,
-                item.type.value,
-                item.summary,
-                item.detail,
-                item.status.value,
-                item.confidence,
-                item.source_kind,
-                item.canonical_key,
-                json.dumps(meta_payload, sort_keys=True),
-                source_sessions,
-                1 if item.default_inject else 0,
-                now,
-                now,
-                0,
-                validated_count,
-            ),
-        )
-        self._conn.commit()
+        with self._conn_lock:
+            self._conn.execute(
+                f"""
+                INSERT INTO {NODES_TABLE} (
+                    id, type, summary, detail, status, confidence,
+                    source_kind, canonical_key, meta, source_sessions, default_inject,
+                    created_at, updated_at, last_recalled_at, validated_count
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    node_id,
+                    item.type.value,
+                    item.summary,
+                    item.detail,
+                    item.status.value,
+                    item.confidence,
+                    item.source_kind,
+                    item.canonical_key,
+                    json.dumps(meta_payload, sort_keys=True),
+                    source_sessions,
+                    1 if item.default_inject else 0,
+                    now,
+                    now,
+                    0,
+                    validated_count,
+                ),
+            )
+            self._conn.commit()
         return node_id
 
     def insert_edge(
@@ -113,37 +118,40 @@ class SparkGraphStore:
         meta: dict[str, Any] | None = None,
     ) -> str:
         edge_id = uuid.uuid4().hex
-        self._conn.execute(
-            f"""
-            INSERT INTO {EDGES_TABLE} (id, from_id, to_id, type, weight, meta, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                edge_id,
-                from_id,
-                to_id,
-                edge_type.value,
-                weight,
-                json.dumps(meta or {}, sort_keys=True),
-                int(time.time()),
-            ),
-        )
-        self._conn.commit()
+        with self._conn_lock:
+            self._conn.execute(
+                f"""
+                INSERT INTO {EDGES_TABLE} (id, from_id, to_id, type, weight, meta, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    edge_id,
+                    from_id,
+                    to_id,
+                    edge_type.value,
+                    weight,
+                    json.dumps(meta or {}, sort_keys=True),
+                    int(time.time()),
+                ),
+            )
+            self._conn.commit()
         return edge_id
 
     def get_node(self, node_id: str):
-        row = self._conn.execute(
-            f"SELECT * FROM {NODES_TABLE} WHERE id = ?",
-            (node_id,),
-        ).fetchone()
+        with self._conn_lock:
+            row = self._conn.execute(
+                f"SELECT * FROM {NODES_TABLE} WHERE id = ?",
+                (node_id,),
+            ).fetchone()
         return dict(row) if row else None
 
     def get_node_by_canonical_key(self, canonical_key: str, node_type: NodeType):
         """通过 canonical_key + type 精确查找节点（用于 IntegrityError 恢复路径）。"""
-        row = self._conn.execute(
-            f"SELECT * FROM {NODES_TABLE} WHERE canonical_key = ? AND type = ? LIMIT 1",
-            (canonical_key, node_type.value),
-        ).fetchone()
+        with self._conn_lock:
+            row = self._conn.execute(
+                f"SELECT * FROM {NODES_TABLE} WHERE canonical_key = ? AND type = ? LIMIT 1",
+                (canonical_key, node_type.value),
+            ).fetchone()
         return dict(row) if row else None
 
     def increment_validated_count(self, node_ids: list[str], *, now_ts: int | None = None) -> None:
@@ -151,13 +159,14 @@ class SparkGraphStore:
         if not node_ids:
             return
         stamp = int(now_ts or time.time())
-        for node_id in node_ids:
-            self._conn.execute(
-                f"""UPDATE {NODES_TABLE} SET validated_count = validated_count + 1,
-                    last_recalled_at = ?, updated_at = updated_at WHERE id = ?""",
-                (stamp, node_id),
-            )
-        self._conn.commit()
+        with self._conn_lock:
+            for node_id in node_ids:
+                self._conn.execute(
+                    f"""UPDATE {NODES_TABLE} SET validated_count = validated_count + 1,
+                        last_recalled_at = ?, updated_at = updated_at WHERE id = ?""",
+                    (stamp, node_id),
+                )
+            self._conn.commit()
 
     def merge_source_sessions(self, node_id: str, new_session_id: str) -> None:
         """去重命中时：合并当前 session 到 source_sessions（去重）。"""
@@ -171,16 +180,17 @@ class SparkGraphStore:
             json.loads(current.get("meta") or "{}"),
             sessions,
         )
-        self._conn.execute(
-            f"UPDATE {NODES_TABLE} SET source_sessions = ?, meta = ?, updated_at = ? WHERE id = ?",
-            (
-                json.dumps(sessions, sort_keys=True),
-                json.dumps(meta, sort_keys=True),
-                int(time.time()),
-                node_id,
-            ),
-        )
-        self._conn.commit()
+        with self._conn_lock:
+            self._conn.execute(
+                f"UPDATE {NODES_TABLE} SET source_sessions = ?, meta = ?, updated_at = ? WHERE id = ?",
+                (
+                    json.dumps(sessions, sort_keys=True),
+                    json.dumps(meta, sort_keys=True),
+                    int(time.time()),
+                    node_id,
+                ),
+            )
+            self._conn.commit()
 
     def merge_nodes(self, keep_id: str, merge_id: str) -> None:
         """将 merge_id 合并到 keep_id：
@@ -209,90 +219,91 @@ class SparkGraphStore:
             sorted(all_sessions),
         )
 
-        self._conn.execute(
-            f"""UPDATE {NODES_TABLE}
-                SET validated_count = ?, source_sessions = ?, meta = ?, updated_at = ?
-                WHERE id = ?""",
-            (
-                merged_validated,
-                json.dumps(list(all_sessions), sort_keys=True),
-                json.dumps(keep_meta, sort_keys=True),
-                now,
-                keep_id,
-            ),
-        )
-
-        # 3. 迁移边（from_id/to_id 替换）——去重在迁移前先执行，防止 UNIQUE 约束冲突
-        # 先删：删除会导致 UNIQUE 冲突的 merge 边（这些边迁移后与 keep 的边重复，保留 keep 的那条）
-        #
-        # 三种冲突模式：
-        # Case 1 — merge→X where X is a keep destination:
-        #   migrate creates duplicate keep→X → delete merge→X
-        # Case 2 — A→merge where A also→keep:
-        #   migrate creates duplicate A→keep → delete A→merge
-        # Case 3 — keep→merge:
-        #   migrate keep→merge to keep→keep creates a self-loop,
-        #   which violates CHECK (from_id <> to_id) → delete keep→merge
-        # Case 4 — merge→keep:
-        #   migrate merge→keep to keep→keep creates a self-loop,
-        #   which violates CHECK (from_id <> to_id) → delete merge→keep
-        self._conn.execute(f"""
-            DELETE FROM {EDGES_TABLE}
-            WHERE (
-                from_id = ?
-                AND to_id IN (SELECT to_id FROM {EDGES_TABLE} WHERE from_id = ?)
+        with self._conn_lock:
+            self._conn.execute(
+                f"""UPDATE {NODES_TABLE}
+                    SET validated_count = ?, source_sessions = ?, meta = ?, updated_at = ?
+                    WHERE id = ?""",
+                (
+                    merged_validated,
+                    json.dumps(list(all_sessions), sort_keys=True),
+                    json.dumps(keep_meta, sort_keys=True),
+                    now,
+                    keep_id,
+                ),
             )
-            OR (
-                to_id = ?
-                AND from_id IN (SELECT from_id FROM {EDGES_TABLE} WHERE to_id = ?)
+
+            # 3. 迁移边（from_id/to_id 替换）——去重在迁移前先执行，防止 UNIQUE 约束冲突
+            # 先删：删除会导致 UNIQUE 冲突的 merge 边（这些边迁移后与 keep 的边重复，保留 keep 的那条）
+            #
+            # 三种冲突模式：
+            # Case 1 — merge→X where X is a keep destination:
+            #   migrate creates duplicate keep→X → delete merge→X
+            # Case 2 — A→merge where A also→keep:
+            #   migrate creates duplicate A→keep → delete A→merge
+            # Case 3 — keep→merge:
+            #   migrate keep→merge to keep→keep creates a self-loop,
+            #   which violates CHECK (from_id <> to_id) → delete keep→merge
+            # Case 4 — merge→keep:
+            #   migrate merge→keep to keep→keep creates a self-loop,
+            #   which violates CHECK (from_id <> to_id) → delete merge→keep
+            self._conn.execute(f"""
+                DELETE FROM {EDGES_TABLE}
+                WHERE (
+                    from_id = ?
+                    AND to_id IN (SELECT to_id FROM {EDGES_TABLE} WHERE from_id = ?)
+                )
+                OR (
+                    to_id = ?
+                    AND from_id IN (SELECT from_id FROM {EDGES_TABLE} WHERE to_id = ?)
+                )
+                OR (
+                    from_id = ?
+                    AND to_id = ?
+                )
+                OR (
+                    from_id = ?
+                    AND to_id = ?
+                )
+            """, (
+                merge_id, keep_id,
+                merge_id, keep_id,
+                keep_id, merge_id,
+                merge_id, keep_id,
+            ))
+
+            # 迁移 from_id
+            self._conn.execute(
+                f"""UPDATE {EDGES_TABLE}
+                    SET from_id = ? WHERE from_id = ?""",
+                (keep_id, merge_id),
             )
-            OR (
-                from_id = ?
-                AND to_id = ?
+            # 迁移 to_id
+            self._conn.execute(
+                f"""UPDATE {EDGES_TABLE}
+                    SET to_id = ? WHERE to_id = ?""",
+                (keep_id, merge_id),
             )
-            OR (
-                from_id = ?
-                AND to_id = ?
+
+            # 4. 删除自环（限制范围：只删 merge_id 产生的自环，避免影响数据库中其他不相关的自环）
+            self._conn.execute(f"DELETE FROM {EDGES_TABLE} WHERE from_id = to_id AND (from_id = ? OR to_id = ?)", (merge_id, merge_id))
+
+            # 5. 去重：保留第一条，删除后续重复
+            self._conn.execute(f"""
+                DELETE FROM {EDGES_TABLE}
+                WHERE rowid NOT IN (
+                    SELECT MIN(rowid) FROM {EDGES_TABLE}
+                    GROUP BY from_id, to_id, type
+                )
+            """)
+
+            # 6. merge 节点 deprecated
+            self._conn.execute(
+                f"UPDATE {NODES_TABLE} SET status = ?, updated_at = ? WHERE id = ?",
+                (NodeStatus.DEPRECATED.value, now, merge_id),
             )
-        """, (
-            merge_id, keep_id,
-            merge_id, keep_id,
-            keep_id, merge_id,
-            merge_id, keep_id,
-        ))
 
-        # 迁移 from_id
-        self._conn.execute(
-            f"""UPDATE {EDGES_TABLE}
-                SET from_id = ? WHERE from_id = ?""",
-            (keep_id, merge_id),
-        )
-        # 迁移 to_id
-        self._conn.execute(
-            f"""UPDATE {EDGES_TABLE}
-                SET to_id = ? WHERE to_id = ?""",
-            (keep_id, merge_id),
-        )
-
-        # 4. 删除自环（限制范围：只删 merge_id 产生的自环，避免影响数据库中其他不相关的自环）
-        self._conn.execute(f"DELETE FROM {EDGES_TABLE} WHERE from_id = to_id AND (from_id = ? OR to_id = ?)", (merge_id, merge_id))
-
-        # 5. 去重：保留第一条，删除后续重复
-        self._conn.execute(f"""
-            DELETE FROM {EDGES_TABLE}
-            WHERE rowid NOT IN (
-                SELECT MIN(rowid) FROM {EDGES_TABLE}
-                GROUP BY from_id, to_id, type
-            )
-        """)
-
-        # 6. merge 节点 deprecated
-        self._conn.execute(
-            f"UPDATE {NODES_TABLE} SET status = ?, updated_at = ? WHERE id = ?",
-            (NodeStatus.DEPRECATED.value, now, merge_id),
-        )
-
-        self._conn.commit()
+            self._conn.commit()
 
         # 7. 失效 PPR 图缓存（merge 改变了图结构）
         # Deferred import to avoid circular dependency: pagerank → store
@@ -309,19 +320,22 @@ class SparkGraphStore:
         if status:
             sql += " WHERE status = ?"
             params.append(status)
-        row = self._conn.execute(sql, tuple(params)).fetchone()
+        with self._conn_lock:
+            row = self._conn.execute(sql, tuple(params)).fetchone()
         return int(row["count"]) if row else 0
 
     def count_nodes_by_type(self) -> dict[str, int]:
-        rows = self._conn.execute(
-            f"SELECT type, COUNT(*) AS count FROM {NODES_TABLE} GROUP BY type"
-        ).fetchall()
+        with self._conn_lock:
+            rows = self._conn.execute(
+                f"SELECT type, COUNT(*) AS count FROM {NODES_TABLE} GROUP BY type"
+            ).fetchall()
         return {str(row["type"]): int(row["count"]) for row in rows}
 
     def count_nodes_by_status(self) -> dict[str, int]:
-        rows = self._conn.execute(
-            f"SELECT status, COUNT(*) AS count FROM {NODES_TABLE} GROUP BY status"
-        ).fetchall()
+        with self._conn_lock:
+            rows = self._conn.execute(
+                f"SELECT status, COUNT(*) AS count FROM {NODES_TABLE} GROUP BY status"
+            ).fetchall()
         return {str(row["status"]): int(row["count"]) for row in rows}
 
     def update_node_scoring(
@@ -350,54 +364,56 @@ class SparkGraphStore:
             # Explicit None → 清除旧字段，保持 meta 干净
             del meta["confidence_components"]
 
-        if detail is not None:
-            # detail provided → update it along with scoring fields
-            self._conn.execute(
-                f"""
-                UPDATE {NODES_TABLE}
-                SET confidence = ?, status = ?, detail = ?, meta = ?, updated_at = ?
-                WHERE id = ?
-                """,
-                (
-                    confidence,
-                    status,
-                    str(detail),
-                    json.dumps(meta, sort_keys=True),
-                    int(time.time()),
-                    node_id,
-                ),
-            )
-        else:
-            self._conn.execute(
-                f"""
-                UPDATE {NODES_TABLE}
-                SET confidence = ?, status = ?, meta = ?, updated_at = ?
-                WHERE id = ?
-                """,
-                (
-                    confidence,
-                    status,
-                    json.dumps(meta, sort_keys=True),
-                    int(time.time()),
-                    node_id,
-                ),
-            )
-        self._conn.commit()
+        with self._conn_lock:
+            if detail is not None:
+                # detail provided → update it along with scoring fields
+                self._conn.execute(
+                    f"""
+                    UPDATE {NODES_TABLE}
+                    SET confidence = ?, status = ?, detail = ?, meta = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        confidence,
+                        status,
+                        str(detail),
+                        json.dumps(meta, sort_keys=True),
+                        int(time.time()),
+                        node_id,
+                    ),
+                )
+            else:
+                self._conn.execute(
+                    f"""
+                    UPDATE {NODES_TABLE}
+                    SET confidence = ?, status = ?, meta = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        confidence,
+                        status,
+                        json.dumps(meta, sort_keys=True),
+                        int(time.time()),
+                        node_id,
+                    ),
+                )
+            self._conn.commit()
 
     def update_node_status(self, node_id: str, *, status: str) -> None:
-        self._conn.execute(
-            f"""
-            UPDATE {NODES_TABLE}
-            SET status = ?, updated_at = ?
-            WHERE id = ?
-            """,
-            (
-                status,
-                int(time.time()),
-                node_id,
-            ),
-        )
-        self._conn.commit()
+        with self._conn_lock:
+            self._conn.execute(
+                f"""
+                UPDATE {NODES_TABLE}
+                SET status = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    status,
+                    int(time.time()),
+                    node_id,
+                ),
+            )
+            self._conn.commit()
 
     def list_nodes(
         self,
@@ -423,7 +439,8 @@ class SparkGraphStore:
             sql += " LIMIT ?"
             params.append(max(1, int(limit)))
 
-        rows = self._conn.execute(sql, tuple(params)).fetchall()
+        with self._conn_lock:
+            rows = self._conn.execute(sql, tuple(params)).fetchall()
         return [dict(row) for row in rows]
 
     @staticmethod
@@ -472,17 +489,18 @@ class SparkGraphStore:
         params.append(max(1, int(limit)))
 
         try:
-            rows = self._conn.execute(
-                f"""
-                SELECT n.*, bm25({NODES_FTS_TABLE}) AS fts_rank
-                FROM {NODES_FTS_TABLE}
-                JOIN {NODES_TABLE} n ON n.rowid = {NODES_FTS_TABLE}.rowid
-                WHERE {" AND ".join(where_parts)}
-                ORDER BY fts_rank ASC, n.updated_at DESC
-                LIMIT ?
-                """,
-                tuple(params),
-            ).fetchall()
+            with self._conn_lock:
+                rows = self._conn.execute(
+                    f"""
+                    SELECT n.*, bm25({NODES_FTS_TABLE}) AS fts_rank
+                    FROM {NODES_FTS_TABLE}
+                    JOIN {NODES_TABLE} n ON n.rowid = {NODES_FTS_TABLE}.rowid
+                    WHERE {" AND ".join(where_parts)}
+                    ORDER BY fts_rank ASC, n.updated_at DESC
+                    LIMIT ?
+                    """,
+                    tuple(params),
+                ).fetchall()
         except sqlite3.OperationalError:
             return []
         return [dict(row) for row in rows]
@@ -514,7 +532,8 @@ class SparkGraphStore:
         """
         params.append(limit)
         try:
-            rows = self._conn.execute(sql, tuple(params)).fetchall()
+            with self._conn_lock:
+                rows = self._conn.execute(sql, tuple(params)).fetchall()
         except sqlite3.OperationalError:
             return []
         return [dict(row) for row in rows]
@@ -522,25 +541,27 @@ class SparkGraphStore:
     def upsert_vector(self, *, node_id: str, content_hash: str, embedding: list[float]) -> None:
         packed = pack_embedding(embedding)
         now = int(time.time())
-        self._conn.execute(
-            f"""
-            INSERT INTO {VECTORS_TABLE} (node_id, content_hash, embedding, dims, updated_at)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(node_id) DO UPDATE SET
-                content_hash = excluded.content_hash,
-                embedding = excluded.embedding,
-                dims = excluded.dims,
-                updated_at = excluded.updated_at
-            """,
-            (node_id, content_hash, sqlite3.Binary(packed), len(embedding), now),
-        )
-        self._conn.commit()
+        with self._conn_lock:
+            self._conn.execute(
+                f"""
+                INSERT INTO {VECTORS_TABLE} (node_id, content_hash, embedding, dims, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(node_id) DO UPDATE SET
+                    content_hash = excluded.content_hash,
+                    embedding = excluded.embedding,
+                    dims = excluded.dims,
+                    updated_at = excluded.updated_at
+                """,
+                (node_id, content_hash, sqlite3.Binary(packed), len(embedding), now),
+            )
+            self._conn.commit()
 
     def get_vector(self, node_id: str) -> dict[str, Any] | None:
-        row = self._conn.execute(
-            f"SELECT node_id, content_hash, embedding, dims, updated_at FROM {VECTORS_TABLE} WHERE node_id = ?",
-            (node_id,),
-        ).fetchone()
+        with self._conn_lock:
+            row = self._conn.execute(
+                f"SELECT node_id, content_hash, embedding, dims, updated_at FROM {VECTORS_TABLE} WHERE node_id = ?",
+                (node_id,),
+            ).fetchone()
         if not row:
             return None
         payload = dict(row)
@@ -566,7 +587,8 @@ class SparkGraphStore:
             sql += " LIMIT ?"
             params.append(max(1, int(limit)))
 
-        rows = self._conn.execute(sql, tuple(params)).fetchall()
+        with self._conn_lock:
+            rows = self._conn.execute(sql, tuple(params)).fetchall()
         items: list[dict[str, Any]] = []
         for row in rows:
             payload = dict(row)
@@ -582,42 +604,47 @@ class SparkGraphStore:
             params.append(status)
         params.append(max(1, int(limit)))
 
-        rows = self._conn.execute(
-            f"""
-            SELECT n.*
-            FROM {NODES_TABLE} n
-            LEFT JOIN {VECTORS_TABLE} v ON v.node_id = n.id
-            WHERE {" AND ".join(where_parts)}
-            ORDER BY n.updated_at DESC
-            LIMIT ?
-            """,
-            tuple(params),
-        ).fetchall()
+        with self._conn_lock:
+            rows = self._conn.execute(
+                f"""
+                SELECT n.*
+                FROM {NODES_TABLE} n
+                LEFT JOIN {VECTORS_TABLE} v ON v.node_id = n.id
+                WHERE {" AND ".join(where_parts)}
+                ORDER BY n.updated_at DESC
+                LIMIT ?
+                """,
+                tuple(params),
+            ).fetchall()
         return [dict(row) for row in rows]
 
     def mark_recalled(self, node_ids: list[str], *, now_ts: int | None = None) -> None:
         if not node_ids:
             return
         stamp = int(now_ts or time.time())
-        for node_id in node_ids:
-            current = self.get_node(node_id)
-            if not current:
-                continue
-            meta = json.loads(current.get("meta") or "{}")
-            meta["recall_hits"] = int(meta.get("recall_hits") or 0) + 1
-            self._conn.execute(
-                f"""
-                UPDATE {NODES_TABLE}
-                SET last_recalled_at = ?, meta = ?, updated_at = updated_at
-                WHERE id = ?
-                """,
-                (
-                    stamp,
-                    json.dumps(meta, sort_keys=True),
-                    node_id,
-                ),
-            )
-        self._conn.commit()
+        with self._conn_lock:
+            for node_id in node_ids:
+                current = self._conn.execute(
+                    f"SELECT * FROM {NODES_TABLE} WHERE id = ?",
+                    (node_id,),
+                ).fetchone()
+                if not current:
+                    continue
+                meta = json.loads(current["meta"] or "{}")
+                meta["recall_hits"] = int(meta.get("recall_hits") or 0) + 1
+                self._conn.execute(
+                    f"""
+                    UPDATE {NODES_TABLE}
+                    SET last_recalled_at = ?, meta = ?, updated_at = updated_at
+                    WHERE id = ?
+                    """,
+                    (
+                        stamp,
+                        json.dumps(meta, sort_keys=True),
+                        node_id,
+                    ),
+                )
+            self._conn.commit()
 
     def get_related_nodes(self, node_ids: list[str], *, active_only: bool = True, limit: int = 4):
         """
@@ -664,7 +691,8 @@ class SparkGraphStore:
         #   subq2: e.to_id IN(s) + e.from_id NOT IN(s) = 2N
         #   outer: n.status = ? (if active_only) = 0 or 1
         params = list(node_ids) * 4 + status_param
-        rows = self._conn.execute(sql, tuple(params)).fetchall()
+        with self._conn_lock:
+            rows = self._conn.execute(sql, tuple(params)).fetchall()
         return [dict(row) for row in rows]
 
     def get_edges_for_nodes(self, node_ids: list[str]) -> list[dict[str, Any]]:
@@ -684,5 +712,6 @@ class SparkGraphStore:
               AND e.to_id   IN ({sp})
             ORDER BY e.created_at ASC
         """
-        rows = self._conn.execute(sql, tuple(node_ids) * 2).fetchall()
+        with self._conn_lock:
+            rows = self._conn.execute(sql, tuple(node_ids) * 2).fetchall()
         return [dict(row) for row in rows]

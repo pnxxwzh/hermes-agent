@@ -239,16 +239,29 @@ def test_manager_passes_session_id_into_recall(tmp_path, monkeypatch):
 
     captured = {}
 
-    def _fake_recall_nodes(store, *, query, config, embedding_config, session_id=None):
+    def _fake_recall_nodes(
+        store,
+        *,
+        query,
+        config,
+        embedding_config,
+        session_id=None,
+        persist_feedback=True,
+    ):
         captured["query"] = query
         captured["session_id"] = session_id
+        captured["persist_feedback"] = persist_feedback
         return [], [], 0
 
     monkeypatch.setattr("agent.sparkgraph.manager.recall_nodes", _fake_recall_nodes)
 
     manager.build_recall_block("proxy config", session_id="sess-42")
 
-    assert captured == {"query": "proxy config", "session_id": "sess-42"}
+    assert captured == {
+        "query": "proxy config",
+        "session_id": "sess-42",
+        "persist_feedback": False,
+    }
 
 
 def test_run_flush_maintenance_scanned_reflects_deprecations(sg_store):

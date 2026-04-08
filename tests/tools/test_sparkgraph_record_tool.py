@@ -1,4 +1,5 @@
 import json
+from unittest.mock import patch
 
 from agent.sparkgraph.store import SparkGraphStore
 from agent.sparkgraph.types import NodeType, NodeStatus, EdgeType
@@ -131,6 +132,58 @@ def test_sparkgraph_record_merges_cross_type_troubleshooting_duplicates(tmp_path
         "SELECT COUNT(*) FROM sg_nodes WHERE status = ?", ("deprecated",)
     ).fetchone()[0]
     assert deprecated_count == 1, "one node should be deprecated (the merged FACT)"
+
+
+def test_sparkgraph_record_cross_type_dedup_upserts_vector_on_keep_node(tmp_path):
+    """Cross-type dedup should refresh the surviving node's embedding, not the merged stub."""
+    store = SparkGraphStore(tmp_path / "sparkgraph" / "default.db")
+
+    first = json.loads(
+        sparkgraph_record_tool(
+            items=[
+                {
+                    "summary": "Use socksio for SOCKS proxy support",
+                    "type": "FACT",
+                    "evidence": "SOCKS proxy errors often mean socksio is missing.",
+                }
+            ],
+            store=store,
+            session_id="session-alpha",
+            turn_index=1,
+            source_kind="flush",
+        )
+    )
+    keep_id = first["recorded_ids"][0]
+
+    with (
+        patch("tools.sparkgraph_tool.embedding_enabled", return_value=True),
+        patch("tools.sparkgraph_tool.create_embedding", return_value=[0.1, 0.2]),
+        patch("tools.sparkgraph_tool.embedding_content_hash", return_value="hash-1"),
+    ):
+        second = json.loads(
+            sparkgraph_record_tool(
+                items=[
+                    {
+                        "summary": "Use socksio for SOCKS proxy support",
+                        "type": "ISSUE",
+                        "evidence": "Install socksio when SOCKS connections fail.",
+                    }
+                ],
+                store=store,
+                session_id="session-beta",
+                turn_index=2,
+                source_kind="flush",
+                embedding_config=object(),
+            )
+        )
+
+    assert second["updated"] == 1
+    assert second["recorded_ids"] == [keep_id]
+    assert store.get_vector(keep_id) is not None
+
+    deprecated_rows = store.list_nodes(status=NodeStatus.DEPRECATED.value)
+    assert len(deprecated_rows) == 1
+    assert store.get_vector(deprecated_rows[0]["id"]) is None
 
 
 def test_sparkgraph_record_links_related_batch_items(tmp_path):
