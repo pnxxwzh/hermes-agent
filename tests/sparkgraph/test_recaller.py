@@ -175,6 +175,43 @@ class TestRecallNodes:
         # summary chars: "proxy pac script"=17 + "proxy pac error"=15 = 32 → 32/3 ≈ 11
         assert token_estimate == pytest.approx(10.67, rel=1)
 
+    def test_direct_hit_priority_beats_explicit_backfill_when_scores_are_close(self, tmp_path):
+        """Direct lexical hits should rank ahead of weaker explicit/manual supplements."""
+        from agent.sparkgraph.store import SparkGraphNodeInput, SparkGraphStore
+        from agent.sparkgraph.types import NodeType
+
+        store = SparkGraphStore(tmp_path / "default.db")
+        direct_id = store.insert_node(
+            SparkGraphNodeInput(
+                type=NodeType.FACT,
+                summary="docker compose proxy issue",
+                canonical_key="fact:docker-compose-proxy-issue",
+                source_kind="flush",
+                status=NodeStatus.ACTIVE,
+                confidence=0.72,
+            )
+        )
+        explicit_id = store.insert_node(
+            SparkGraphNodeInput(
+                type=NodeType.FACT,
+                summary="docker desktop install note",
+                canonical_key="fact:docker-desktop-install-note",
+                source_kind="explicit",
+                status=NodeStatus.ACTIVE,
+                confidence=0.88,
+            )
+        )
+        store.conn.execute("UPDATE sg_nodes SET validated_count = 20 WHERE id = ?", (explicit_id,))
+        store.conn.commit()
+
+        nodes, _, _ = recall_nodes(
+            store,
+            query="docker compose proxy issue",
+            config=RecallConfig(max_nodes=4, related_limit=0, vector_limit=0),
+        )
+
+        assert nodes[0]["id"] == direct_id
+
 
 # ─── Tests for Session Pool ──────────────────────────────────────
 

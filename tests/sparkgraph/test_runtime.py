@@ -9,9 +9,9 @@ def test_runtime_snapshot_defaults_to_non_degraded_when_optional_runtimes_unset(
 
     assert snapshot.healthy is True
     assert snapshot.degraded is False
-    assert snapshot.embedding.enabled is True
-    assert snapshot.embedding.healthy is True
-    assert snapshot.embedding.details["probe_skipped"] is True
+    assert snapshot.embedding.enabled is False
+    assert snapshot.embedding.healthy is False
+    assert "not configured" in snapshot.embedding.reason
 
 
 def test_embedding_runtime_health_marks_partial_config_degraded(tmp_path):

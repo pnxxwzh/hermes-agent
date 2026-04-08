@@ -70,18 +70,87 @@ def _rebuild_fts_table(conn: sqlite3.Connection) -> None:
 
 def _recreate_table_drop_column(conn: sqlite3.Connection, table: str, drop_col: str) -> None:
     """Fallback: recreate table without drop_col (SQLite < 3.35.0)."""
-    col_info = conn.execute(f"PRAGMA table_info({table})").fetchall()
-    cols = [r["name"] for r in col_info if r["name"] != drop_col]
-    col_list = ", ".join(cols)
-    conn.execute(f"CREATE TABLE {table}_new AS SELECT {col_list} FROM {table}")
+    if table != NODES_TABLE:
+        raise ValueError(f"Unsupported table recreation fallback for {table}")
+
+    node_types_sql = ", ".join(f"'{value}'" for value in NODE_TYPES)
+    node_statuses_sql = ", ".join(f"'{value}'" for value in NODE_STATUSES)
+    source_kinds_sql = ", ".join(f"'{value}'" for value in SOURCE_KINDS)
+
+    conn.execute(
+        f"""
+        CREATE TABLE {table}_new (
+            id TEXT PRIMARY KEY,
+            type TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            detail TEXT NOT NULL DEFAULT '',
+            status TEXT NOT NULL,
+            confidence REAL NOT NULL DEFAULT 0,
+            source_kind TEXT NOT NULL,
+            canonical_key TEXT NOT NULL,
+            meta TEXT NOT NULL DEFAULT '{{}}',
+            source_sessions TEXT NOT NULL DEFAULT '[]',
+            default_inject INTEGER NOT NULL DEFAULT 1,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            last_recalled_at INTEGER NOT NULL DEFAULT 0,
+            validated_count INTEGER NOT NULL DEFAULT 0,
+            CHECK(type IN ({node_types_sql})),
+            CHECK(status IN ({node_statuses_sql})),
+            CHECK(source_kind IN ({source_kinds_sql}))
+        )
+        """
+    )
+    conn.execute(
+        f"""
+        INSERT INTO {table}_new (
+            id, type, summary, detail, status, confidence,
+            source_kind, canonical_key, meta, source_sessions, default_inject,
+            created_at, updated_at, last_recalled_at, validated_count
+        )
+        SELECT
+            id, type, summary, detail, status, confidence,
+            source_kind, canonical_key, meta,
+            COALESCE(source_sessions, '[]'),
+            COALESCE(default_inject, 1),
+            created_at, updated_at,
+            COALESCE(last_recalled_at, 0),
+            COALESCE(validated_count, 0)
+        FROM {table}
+        """
+    )
     conn.execute(f"DROP TABLE {table}")
     conn.execute(f"ALTER TABLE {table}_new RENAME TO {table}")
     conn.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS ux_sg_nodes_canonical_type ON {NODES_TABLE}(canonical_key, type)")
     conn.execute(f"CREATE INDEX IF NOT EXISTS ix_sg_nodes_status_type ON {NODES_TABLE}(status, type)")
     conn.execute(f"CREATE INDEX IF NOT EXISTS ix_sg_nodes_updated_at ON {NODES_TABLE}(updated_at)")
-    # Rebuild FTS index so search_nodes() still works after table recreation
-    if table == NODES_TABLE:
-        _rebuild_fts_table(conn)
+    conn.execute(
+        f"""
+        CREATE TRIGGER IF NOT EXISTS sg_nodes_ai AFTER INSERT ON {NODES_TABLE} BEGIN
+            INSERT INTO {NODES_FTS_TABLE}(rowid, summary, detail)
+            VALUES (new.rowid, new.summary, new.detail);
+        END;
+        """
+    )
+    conn.execute(
+        f"""
+        CREATE TRIGGER IF NOT EXISTS sg_nodes_ad AFTER DELETE ON {NODES_TABLE} BEGIN
+            INSERT INTO {NODES_FTS_TABLE}({NODES_FTS_TABLE}, rowid, summary, detail)
+            VALUES ('delete', old.rowid, old.summary, old.detail);
+        END;
+        """
+    )
+    conn.execute(
+        f"""
+        CREATE TRIGGER IF NOT EXISTS sg_nodes_au AFTER UPDATE ON {NODES_TABLE} BEGIN
+            INSERT INTO {NODES_FTS_TABLE}({NODES_FTS_TABLE}, rowid, summary, detail)
+            VALUES ('delete', old.rowid, old.summary, old.detail);
+            INSERT INTO {NODES_FTS_TABLE}(rowid, summary, detail)
+            VALUES (new.rowid, new.summary, new.detail);
+        END;
+        """
+    )
+    _rebuild_fts_table(conn)
 
 
 def initialize_schema(conn: sqlite3.Connection) -> None:
@@ -222,6 +291,9 @@ def initialize_schema(conn: sqlite3.Connection) -> None:
             except Exception:
                 # SQLite >= 3.35.0 required for DROP COLUMN; fallback: recreate table
                 _recreate_table_drop_column(conn, NODES_TABLE, col)
+            node_columns = {
+                row["name"] for row in conn.execute(f"PRAGMA table_info({NODES_TABLE})").fetchall()
+            }
 
     # ── Migration v3: add SOLVES to sg_edges CHECK constraint ──────────────────
     # SQLite CHECK constraints cannot be altered in-place.

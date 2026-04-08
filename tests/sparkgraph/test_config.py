@@ -17,6 +17,9 @@ def test_parse_sparkgraph_config_uses_profile_scoped_defaults(tmp_path):
     assert config.mode == "flush_integrated"
     assert config.db_path == tmp_path / "sparkgraph" / "default.db"
     assert config.recall.enabled is True
+    assert config.embedding.provider == ""
+    assert config.embedding.model == ""
+    assert config.embedding.base_url == ""
 
 
 def test_parse_sparkgraph_config_honors_custom_db_path(tmp_path):

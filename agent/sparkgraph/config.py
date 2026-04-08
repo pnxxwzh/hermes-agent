@@ -19,12 +19,12 @@ DEFAULT_SPARKGRAPH_CONFIG: Dict[str, Any] = {
         "max_chars": 1800,
     },
     "embedding": {
-        # Local bge-m3-mlx-8bit embedding server (OpenAI-compatible API)
-        # 1024-dim multilingual embeddings including Chinese
-        "provider": "custom",
-        "model": "bge-m3-mlx-8bit",
-        "base_url": "http://127.0.0.1:8000/v1",
-        "api_key": "1234",
+        # Embeddings are opt-in. Leaving these blank avoids surprise network
+        # calls on fresh installs where no embedding runtime is configured.
+        "provider": "",
+        "model": "",
+        "base_url": "",
+        "api_key": "",
         "timeout": 20,
     },
 }
@@ -130,25 +130,27 @@ def parse_sparkgraph_config(raw: Dict[str, Any] | None, hermes_home: Path | None
     )
 
     embedding_raw = _require_dict(raw.get("embedding"), "embedding")
+    use_embedding_defaults = "embedding" not in raw
+    embedding_defaults = DEFAULT_SPARKGRAPH_CONFIG["embedding"] if use_embedding_defaults else {}
     embedding = SparkGraphEmbeddingConfig(
         provider=_require_string(
-            embedding_raw.get("provider", DEFAULT_SPARKGRAPH_CONFIG["embedding"]["provider"]),
+            embedding_raw.get("provider", embedding_defaults.get("provider", "")),
             "embedding.provider",
         ),
         model=_require_string(
-            embedding_raw.get("model", DEFAULT_SPARKGRAPH_CONFIG["embedding"]["model"]),
+            embedding_raw.get("model", embedding_defaults.get("model", "")),
             "embedding.model",
         ),
         base_url=_require_string(
-            embedding_raw.get("base_url", DEFAULT_SPARKGRAPH_CONFIG["embedding"]["base_url"]),
+            embedding_raw.get("base_url", embedding_defaults.get("base_url", "")),
             "embedding.base_url",
         ),
         api_key=_require_string(
-            embedding_raw.get("api_key", DEFAULT_SPARKGRAPH_CONFIG["embedding"]["api_key"]),
+            embedding_raw.get("api_key", embedding_defaults.get("api_key", "")),
             "embedding.api_key",
         ),
         timeout=_require_positive_int(
-            embedding_raw.get("timeout", DEFAULT_SPARKGRAPH_CONFIG["embedding"]["timeout"]),
+            embedding_raw.get("timeout", embedding_defaults.get("timeout", DEFAULT_SPARKGRAPH_CONFIG["embedding"]["timeout"])),
             "embedding.timeout",
         ),
     )

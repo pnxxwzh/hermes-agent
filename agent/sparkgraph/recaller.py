@@ -263,7 +263,7 @@ def _rank_with_ppr(
     pool: dict[str, PoolEntry] | None = None,
 ) -> list[dict[str, Any]]:
     """Rank nodes using PPR scores and recall_priority_score."""
-    scored: list[tuple[float, float, float, float, float, float, int, dict[str, Any]]] = []
+    scored: list[tuple[float, float, float, float, float, float, float, int, dict[str, Any]]] = []
     for node in nodes:
         nid = str(node.get("id") or "")
         ppr = ppr_scores.get(nid, 0.0)
@@ -280,6 +280,8 @@ def _rank_with_ppr(
             superseded=bool(meta.get("superseded_by") or meta.get("superseded")),
         )
         semantic = float(node.get("semantic_score") or 0.0)
+        match_priority = float(node.get("_match_priority") or 0.0)
+        lexical = float(node.get("_lexical_score") or 0.0)
         conf = float(node.get("confidence") or 0.0)
         validated = float(node.get("validated_count") or 0)
         updated = int(node.get("updated_at") or 0)
@@ -288,9 +290,25 @@ def _rank_with_ppr(
         # same priority level without overriding genuinely better new matches.
         from_pool = float(bool(node.get("_from_pool")))
         pool_lrfu = float(node.get("_pool_lrfu") or 0.0)
-        scored.append((priority, from_pool, pool_lrfu, validated, semantic, conf, updated, node_copy))
-    scored.sort(key=lambda x: (x[0], x[1], x[2], x[3], x[4], x[5], x[6]), reverse=True)
-    return [item[7] for item in scored]
+        scored.append(
+            (
+                priority,
+                match_priority,
+                lexical,
+                from_pool,
+                pool_lrfu,
+                validated,
+                semantic,
+                conf,
+                updated,
+                node_copy,
+            )
+        )
+    scored.sort(
+        key=lambda x: (x[0], x[1], x[2], x[3], x[4], x[5], x[6], x[7], x[8]),
+        reverse=True,
+    )
+    return [item[9] for item in scored]
 
 
 def _rank_legacy(
@@ -298,11 +316,23 @@ def _rank_legacy(
     pool: dict[str, PoolEntry] | None = None,
 ) -> list[dict[str, Any]]:
     """Fallback rank when PPR is unavailable; pool nodes get secondary boost."""
-    def _pool_sort_key(node: dict[str, Any]) -> tuple[float, float, float, int]:
+    def _pool_sort_key(node: dict[str, Any]) -> tuple[float, float, float, float, float, float, int]:
+        meta = node.get("meta") or {}
+        if isinstance(meta, str):
+            meta = _json.loads(meta)
+        priority = recall_priority_score(
+            ppr_score=0.0,
+            validated_count=node.get("validated_count", 0),
+            confidence=float(node.get("confidence") or 0.0),
+            source_kind=str(node.get("source_kind") or ""),
+            superseded=bool(meta.get("superseded_by") or meta.get("superseded")),
+        )
+        match_priority = float(node.get("_match_priority") or 0.0)
+        lexical = float(node.get("_lexical_score") or 0.0)
         from_pool = float(bool(node.get("_from_pool")))
         pool_lrfu = float(node.get("_pool_lrfu") or 0.0)
         base = _sort_key(node)
-        return (from_pool, pool_lrfu, base[0], base[1], base[2])
+        return (from_pool, pool_lrfu, match_priority, priority, lexical, base[1], base[2])
     return sorted(nodes, key=_pool_sort_key, reverse=True)
 
 
@@ -415,9 +445,9 @@ def recall_nodes(
     # 合并去重
     merged: dict[str, dict[str, Any]] = {}
     for idx, node in enumerate(raw_fts):
-        _merge_hit(merged, node, match_priority=3, lexical_score=float(len(raw_fts) - idx))
+        _merge_hit(merged, node, match_priority=4, lexical_score=float(len(raw_fts) - idx))
     for idx, node in enumerate(raw_vector):
-        _merge_hit(merged, node, match_priority=2, semantic_score=float(node.get("semantic_score") or 0.0))
+        _merge_hit(merged, node, match_priority=3, semantic_score=float(node.get("semantic_score") or 0.0))
 
     # ── Pool layer: inject previously-seen nodes with boosted priority ──
     # Nodes that were recalled in previous turns of this session get a
@@ -463,12 +493,12 @@ def recall_nodes(
     )
     for node in explicit_nodes:
         if node.get("id") not in existing_ids:
-            _merge_hit(merged, node, match_priority=4)
+            _merge_hit(merged, node, match_priority=2)
             existing_ids.add(node["id"])
 
     # ── 排序 ─────────────────────────────────────────────────────────
     all_nodes = list(merged.values())
-    use_ppr = bool(graph_hits) or bool(seed_ids)
+    use_ppr = bool(graph_hits)
     ranked = _rank_nodes(all_nodes, use_ppr=use_ppr, seed_ids=seed_ids, store=store, pool=pool)
 
     final = ranked[: config.max_nodes]
