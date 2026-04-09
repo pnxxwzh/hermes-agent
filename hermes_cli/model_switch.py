@@ -71,6 +71,7 @@ def switch_model(
     from hermes_cli.models import (
         parse_model_input,
         detect_provider_for_model,
+        normalize_aggregator_model_input,
         validate_requested_model,
         _PROVIDER_LABELS,
     )
@@ -89,6 +90,7 @@ def switch_model(
     # was used.  Skip for custom providers — the model name might
     # coincidentally match a known provider's catalog.
     if target_provider == current_provider and not is_custom:
+        new_model = normalize_aggregator_model_input(new_model, current_provider)
         detected = detect_provider_for_model(new_model, current_provider)
         if detected:
             target_provider, new_model = detected

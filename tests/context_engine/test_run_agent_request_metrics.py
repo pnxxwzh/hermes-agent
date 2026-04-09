@@ -326,7 +326,10 @@ class TestRunAgentRequestMetrics:
         assert result["context_metrics"] is agent._last_context_metrics
 
     def test_anthropic_request_metrics_use_transport_visible_metric_view(self):
-        from agent.anthropic_adapter import convert_messages_to_anthropic_metric_view
+        from agent.anthropic_adapter import (
+            convert_messages_to_anthropic_metric_view,
+            resolve_anthropic_endpoint_policy,
+        )
 
         agent = self._make_agent(api_mode="anthropic_messages")
         request_messages = [
@@ -364,7 +367,14 @@ class TestRunAgentRequestMetrics:
             original_message_persistence_by_index={4: "inline"},
         )
 
-        _, metric_messages = convert_messages_to_anthropic_metric_view(request_messages)
+        prepared_messages = agent._prepare_anthropic_messages_for_api(request_messages)
+        endpoint_policy = resolve_anthropic_endpoint_policy(
+            getattr(agent, "_anthropic_base_url", None) or getattr(agent, "base_url", None)
+        )
+        _, metric_messages = convert_messages_to_anthropic_metric_view(
+            prepared_messages,
+            endpoint_policy=endpoint_policy,
+        )
         expected_assistant_chars = sum(
             len(str(message)) for message in metric_messages if message.get("role") == "assistant"
         )
@@ -374,3 +384,43 @@ class TestRunAgentRequestMetrics:
 
         assert metrics.get_bucket("messages_assistant").char_count == expected_assistant_chars
         assert metrics.get_bucket("messages_tool_hot").char_count == expected_tool_chars
+
+    def test_anthropic_request_metrics_strip_signatures_for_third_party_endpoints(self):
+        from agent.anthropic_adapter import (
+            convert_messages_to_anthropic_metric_view,
+            resolve_anthropic_endpoint_policy,
+        )
+
+        agent = self._make_agent(api_mode="anthropic_messages")
+        agent._anthropic_base_url = "https://api.minimax.io/anthropic"
+        request_messages = [
+            {"role": "user", "content": "Continue"},
+            {
+                "role": "assistant",
+                "content": "Latest",
+                "reasoning_details": [
+                    {"type": "thinking", "thinking": "new chain", "signature": "sig-new"},
+                ],
+            },
+        ]
+        assembly = self._make_request_assembly(messages=request_messages)
+
+        metrics = agent._build_final_request_metrics(
+            input_assembly=assembly,
+            final_api_messages=list(request_messages),
+            effective_system="",
+            prefill_messages=[],
+            original_request_messages=list(request_messages),
+            original_message_heat_by_index={},
+            original_message_persistence_by_index={},
+        )
+
+        _, metric_messages = convert_messages_to_anthropic_metric_view(
+            request_messages,
+            endpoint_policy=resolve_anthropic_endpoint_policy("https://api.minimax.io/anthropic"),
+        )
+        expected_assistant_chars = sum(
+            len(str(message)) for message in metric_messages if message.get("role") == "assistant"
+        )
+
+        assert metrics.get_bucket("messages_assistant").char_count == expected_assistant_chars

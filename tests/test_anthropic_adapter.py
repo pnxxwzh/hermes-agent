@@ -5,6 +5,7 @@ import time
 from types import SimpleNamespace
 from unittest.mock import patch, MagicMock
 
+import httpx
 import pytest
 
 from agent.prompt_caching import apply_anthropic_cache_control
@@ -22,6 +23,7 @@ from agent.anthropic_adapter import (
     normalize_anthropic_response,
     normalize_model_name,
     read_claude_code_credentials,
+    resolve_anthropic_endpoint_policy,
     resolve_anthropic_token,
     run_oauth_setup_token,
 )
@@ -94,6 +96,17 @@ class TestBuildAnthropicClient:
             assert kwargs["default_headers"] == {
                 "anthropic-beta": "interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14"
             }
+
+    def test_httpx_url_base_url_uses_bearer_auth_for_minimax(self):
+        with patch("agent.anthropic_adapter._anthropic_sdk") as mock_sdk:
+            build_anthropic_client(
+                "minimax-secret-123",
+                base_url=httpx.URL("https://api.minimax.io/anthropic"),
+            )
+            kwargs = mock_sdk.Anthropic.call_args[1]
+            assert kwargs["base_url"] == "https://api.minimax.io/anthropic"
+            assert kwargs["auth_token"] == "minimax-secret-123"
+            assert "api_key" not in kwargs
 
 
 class TestReadClaudeCodeCredentials:
@@ -1322,6 +1335,75 @@ class TestRoleAlternation:
         _, result = convert_messages_to_anthropic(messages)
         assert len(result) == 3
         assert [m["role"] for m in result] == ["user", "assistant", "user"]
+
+
+class TestAnthropicEndpointPolicy:
+    def test_official_endpoint_keeps_signatures(self):
+        policy = resolve_anthropic_endpoint_policy("https://api.anthropic.com")
+        assert policy.is_official_anthropic is True
+        assert policy.is_third_party_compatible is False
+        assert policy.strip_thinking_signatures is False
+
+    def test_third_party_endpoint_strips_signatures(self):
+        policy = resolve_anthropic_endpoint_policy("https://api.minimax.io/anthropic")
+        assert policy.is_official_anthropic is False
+        assert policy.is_third_party_compatible is True
+        assert policy.strip_thinking_signatures is True
+
+    def test_httpx_url_is_supported(self):
+        policy = resolve_anthropic_endpoint_policy(httpx.URL("https://api.minimax.io/anthropic"))
+        assert policy.base_url == "https://api.minimax.io/anthropic"
+        assert policy.requires_bearer_auth is True
+
+    def test_convert_messages_strips_signed_thinking_for_third_party_endpoints(self):
+        messages = [
+            {"role": "user", "content": "Hi"},
+            {
+                "role": "assistant",
+                "content": "Answer",
+                "reasoning_details": [
+                    {"type": "thinking", "thinking": "chain", "signature": "sig-123"},
+                ],
+            },
+        ]
+        _, converted = convert_messages_to_anthropic(
+            messages,
+            endpoint_policy=resolve_anthropic_endpoint_policy("https://api.minimax.io/anthropic"),
+        )
+        assistant_blocks = converted[-1]["content"]
+        assert all(
+            not (isinstance(block, dict) and block.get("type") == "thinking")
+            for block in assistant_blocks
+        )
+        assert {"type": "text", "text": "chain"} in assistant_blocks
+
+    def test_metric_view_matches_third_party_signature_stripping(self):
+        request_messages = [
+            {
+                "role": "assistant",
+                "content": "Earlier",
+                "reasoning_details": [
+                    {"type": "thinking", "thinking": "old", "signature": "sig-old"},
+                ],
+            },
+            {"role": "user", "content": "Continue"},
+            {
+                "role": "assistant",
+                "content": "Latest",
+                "reasoning_details": [
+                    {"type": "thinking", "thinking": "new", "signature": "sig-new"},
+                ],
+            },
+        ]
+        _, metric_messages = convert_messages_to_anthropic_metric_view(
+            request_messages,
+            endpoint_policy=resolve_anthropic_endpoint_policy("https://api.minimax.io/anthropic"),
+        )
+        assistant_content = metric_messages[-1]["content"]
+        assert all(
+            not (isinstance(block, dict) and block.get("type") == "thinking")
+            for block in assistant_content
+        )
 
 
 # ---------------------------------------------------------------------------

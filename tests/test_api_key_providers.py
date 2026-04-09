@@ -116,6 +116,8 @@ class TestProviderRegistry:
         assert PROVIDER_REGISTRY["nous"].auth_type == "oauth_device_code"
         assert "openai-codex" in PROVIDER_REGISTRY
         assert PROVIDER_REGISTRY["openai-codex"].auth_type == "oauth_external"
+        assert "qwen-oauth" in PROVIDER_REGISTRY
+        assert PROVIDER_REGISTRY["qwen-oauth"].auth_type == "oauth_external"
 
 
 # =============================================================================

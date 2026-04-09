@@ -28,6 +28,7 @@ import uuid
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from datetime import datetime
+from dataclasses import dataclass
 from typing import Dict, Optional, Any, List
 
 # ---------------------------------------------------------------------------
@@ -182,6 +183,15 @@ if _config_path.exists():
         if _agent_cfg and isinstance(_agent_cfg, dict):
             if "max_turns" in _agent_cfg:
                 os.environ["HERMES_MAX_ITERATIONS"] = str(_agent_cfg["max_turns"])
+            if "gateway_timeout" in _agent_cfg and "HERMES_AGENT_TIMEOUT" not in os.environ:
+                os.environ["HERMES_AGENT_TIMEOUT"] = str(_agent_cfg["gateway_timeout"])
+            if (
+                "gateway_timeout_warning" in _agent_cfg
+                and "HERMES_AGENT_TIMEOUT_WARNING" not in os.environ
+            ):
+                os.environ["HERMES_AGENT_TIMEOUT_WARNING"] = str(
+                    _agent_cfg["gateway_timeout_warning"]
+                )
         # Timezone: bridge config.yaml → HERMES_TIMEZONE env var.
         # HERMES_TIMEZONE from .env takes precedence (already in os.environ).
         _tz_cfg = _cfg.get("timezone", "")
@@ -276,6 +286,47 @@ logger = logging.getLogger(__name__)
 # session from bypassing the "already running" guard during the async gap
 # between the guard check and actual agent creation.
 _AGENT_PENDING_SENTINEL = object()
+
+
+@dataclass(frozen=True)
+class GatewayInactivityPolicy:
+    """Resolved timeout policy for gateway-managed agent runs."""
+
+    hard_timeout_seconds: Optional[float]
+    warning_timeout_seconds: Optional[float]
+    stale_eviction_wall_ttl_seconds: float
+    poll_interval_seconds: float = 5.0
+    long_running_notify_interval_seconds: float = 600.0
+
+
+def _coerce_timeout_seconds(raw_value: Any, default_seconds: float) -> float:
+    """Coerce timeout-ish values while preserving current defaults on errors."""
+    if raw_value is None:
+        return float(default_seconds)
+    try:
+        return float(raw_value)
+    except (TypeError, ValueError):
+        return float(default_seconds)
+
+
+def _resolve_gateway_inactivity_policy() -> GatewayInactivityPolicy:
+    """Resolve inactivity timeout / warning policy from env-backed config."""
+    raw_timeout = _coerce_timeout_seconds(os.getenv("HERMES_AGENT_TIMEOUT"), 1800.0)
+    hard_timeout = raw_timeout if raw_timeout > 0 else None
+
+    raw_warning = _coerce_timeout_seconds(
+        os.getenv("HERMES_AGENT_TIMEOUT_WARNING"), 900.0
+    )
+    warning_timeout: Optional[float] = None
+    if hard_timeout is not None and raw_warning > 0 and raw_warning < hard_timeout:
+        warning_timeout = raw_warning
+
+    stale_ttl = max(raw_timeout * 10.0, 7200.0) if raw_timeout > 0 else float("inf")
+    return GatewayInactivityPolicy(
+        hard_timeout_seconds=hard_timeout,
+        warning_timeout_seconds=warning_timeout,
+        stale_eviction_wall_ttl_seconds=stale_ttl,
+    )
 
 
 def _resolve_runtime_agent_kwargs() -> dict:
@@ -460,6 +511,7 @@ class GatewayRunner:
         # Track running agents per session for interrupt support
         # Key: session_key, Value: AIAgent instance
         self._running_agents: Dict[str, Any] = {}
+        self._running_agents_ts: Dict[str, float] = {}
         self._pending_messages: Dict[str, str] = {}  # Queued messages during interrupt
 
         # Cache AIAgent instances per session to preserve prompt caching.
@@ -521,6 +573,289 @@ class GatewayRunner:
 
         # Track background tasks to prevent garbage collection mid-execution
         self._background_tasks: set = set()
+
+    def _get_agent_idle_seconds(self, agent: Any) -> Optional[float]:
+        """Return seconds since the agent last reported activity when available."""
+        if not agent or agent is _AGENT_PENDING_SENTINEL:
+            return None
+        if not hasattr(agent, "get_activity_summary"):
+            return None
+        try:
+            activity = agent.get_activity_summary()
+        except Exception:
+            return None
+        try:
+            return float(activity.get("seconds_since_activity", float("inf")))
+        except (TypeError, ValueError):
+            return None
+
+    def _running_agent_timestamps(self) -> Dict[str, float]:
+        """Return the running-agent timestamp map, creating it for lightweight test runners."""
+        mapping = getattr(self, "_running_agents_ts", None)
+        if mapping is None:
+            mapping = {}
+            self._running_agents_ts = mapping
+        return mapping
+
+    def _format_agent_activity_detail(self, agent: Any) -> str:
+        """Build a compact diagnostic suffix for stale-lock logging."""
+        if not agent or agent is _AGENT_PENDING_SENTINEL:
+            return ""
+        if not hasattr(agent, "get_activity_summary"):
+            return ""
+        try:
+            activity = agent.get_activity_summary()
+        except Exception:
+            return ""
+        idle_secs = activity.get("seconds_since_activity", 0.0)
+        try:
+            idle_display = float(idle_secs)
+        except (TypeError, ValueError):
+            idle_display = 0.0
+        return (
+            f" | last_activity={activity.get('last_activity_desc', 'unknown')} "
+            f"({idle_display:.0f}s ago) "
+            f"| iteration={activity.get('api_call_count', 0)}/"
+            f"{activity.get('max_iterations', 0)}"
+        )
+
+    def _maybe_evict_stale_running_agent(
+        self, session_key: str, policy: GatewayInactivityPolicy
+    ) -> bool:
+        """Evict leaked running-agent locks once they are truly stale."""
+        running_agent = self._running_agents.get(session_key)
+        if running_agent is None:
+            return False
+
+        started_at = self._running_agent_timestamps().get(session_key, 0.0)
+        if not started_at:
+            return False
+
+        age_seconds = time.time() - started_at
+        wall_ttl = policy.stale_eviction_wall_ttl_seconds
+
+        if running_agent is _AGENT_PENDING_SENTINEL:
+            idle_seconds = float("inf")
+            detail = ""
+            should_evict = age_seconds > wall_ttl
+        else:
+            idle_seconds = self._get_agent_idle_seconds(running_agent)
+            detail = self._format_agent_activity_detail(running_agent)
+            should_evict = (
+                (
+                    policy.hard_timeout_seconds is not None
+                    and idle_seconds is not None
+                    and idle_seconds >= policy.hard_timeout_seconds
+                )
+                or age_seconds > wall_ttl
+            )
+
+        if not should_evict:
+            return False
+
+        logger.warning(
+            "Evicting stale _running_agents entry for %s "
+            "(age: %.0fs, idle: %.0fs, timeout: %s)%s",
+            session_key[:30],
+            age_seconds,
+            idle_seconds if idle_seconds is not None else float("inf"),
+            (
+                f"{policy.hard_timeout_seconds:.0f}s"
+                if policy.hard_timeout_seconds is not None
+                else "unlimited"
+            ),
+            detail,
+        )
+        self._running_agents.pop(session_key, None)
+        self._running_agent_timestamps().pop(session_key, None)
+        return True
+
+    async def _send_gateway_inactivity_warning(
+        self,
+        *,
+        source: SessionSource,
+        metadata: Optional[Dict[str, Any]],
+        warning_timeout_seconds: float,
+    ) -> None:
+        """Send a staged inactivity warning without disturbing the hard-timeout path."""
+        adapter = self.adapters.get(source.platform)
+        if not adapter:
+            return
+        warning_minutes = int(warning_timeout_seconds // 60) or 1
+        await adapter.send(
+            source.chat_id,
+            f"⚠️ No activity for {warning_minutes} min. "
+            f"If the agent does not respond soon, it will be timed out in "
+            f"{warning_minutes} min. You can continue waiting or use /reset.",
+            metadata=metadata,
+        )
+
+    def _build_gateway_inactivity_timeout_response(
+        self,
+        *,
+        session_key: str,
+        timeout_seconds: float,
+        timed_out_agent: Any,
+        result_holder: List[Optional[Dict[str, Any]]],
+        tools_holder: List[Optional[List[Dict[str, Any]]]],
+    ) -> Dict[str, Any]:
+        """Construct the user-facing timeout payload from the agent activity tracker."""
+        activity: Dict[str, Any] = {}
+        if timed_out_agent and hasattr(timed_out_agent, "get_activity_summary"):
+            try:
+                activity = timed_out_agent.get_activity_summary()
+            except Exception:
+                activity = {}
+
+        seconds_since_activity = activity.get("seconds_since_activity", timeout_seconds)
+        last_desc = activity.get("last_activity_desc", "unknown")
+        current_tool = activity.get("current_tool")
+        iteration_num = activity.get("api_call_count", 0)
+        iteration_max = activity.get("max_iterations", 0)
+
+        logger.error(
+            "Agent idle for %.0fs (timeout %.0fs) in session %s "
+            "| last_activity=%s | iteration=%s/%s | tool=%s",
+            seconds_since_activity,
+            timeout_seconds,
+            session_key,
+            last_desc,
+            iteration_num,
+            iteration_max,
+            current_tool or "none",
+        )
+
+        if timed_out_agent and hasattr(timed_out_agent, "interrupt"):
+            timed_out_agent.interrupt("Execution timed out (inactivity)")
+
+        timeout_minutes = int(timeout_seconds // 60) or 1
+        diag_lines = [
+            f"⏱️ Agent inactive for {timeout_minutes} min — no tool calls or API responses."
+        ]
+        if current_tool:
+            diag_lines.append(
+                f"The agent appears stuck on tool `{current_tool}` "
+                f"({seconds_since_activity:.0f}s since last activity, "
+                f"iteration {iteration_num}/{iteration_max})."
+            )
+        else:
+            diag_lines.append(
+                "The agent may have been waiting on an API response."
+            )
+        diag_lines.append(
+            "To increase the limit, set agent.gateway_timeout in config.yaml "
+            "(value in seconds, 0 = no limit) and restart the gateway.\n"
+            "Try again, or use /reset to start fresh."
+        )
+
+        prior_result = result_holder[0] or {}
+        return {
+            "final_response": "\n".join(diag_lines),
+            "messages": prior_result.get("messages", []),
+            "api_calls": prior_result.get("api_calls", 0),
+            "tools": tools_holder[0] or [],
+            "history_offset": 0,
+            "failed": True,
+        }
+
+    async def _await_run_sync_with_inactivity_policy(
+        self,
+        *,
+        loop: asyncio.AbstractEventLoop,
+        run_sync,
+        source: SessionSource,
+        session_key: str,
+        agent_holder: List[Any],
+        result_holder: List[Optional[Dict[str, Any]]],
+        tools_holder: List[Optional[List[Dict[str, Any]]]],
+        status_thread_metadata: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Await a threaded agent run using inactivity-aware timeout semantics."""
+        policy = _resolve_gateway_inactivity_policy()
+        executor_task = asyncio.ensure_future(loop.run_in_executor(None, run_sync))
+
+        def _drain_executor_result(fut: asyncio.Future) -> None:
+            try:
+                fut.result()
+            except Exception as exc:
+                logger.debug("Background gateway executor finished after timeout: %s", exc)
+
+        long_running_started_at = time.time()
+
+        async def notify_long_running() -> None:
+            adapter = self.adapters.get(source.platform)
+            if not adapter:
+                return
+            while True:
+                await asyncio.sleep(policy.long_running_notify_interval_seconds)
+                elapsed_minutes = int((time.time() - long_running_started_at) // 60)
+                try:
+                    await adapter.send(
+                        source.chat_id,
+                        f"⏳ Still working... ({elapsed_minutes} minutes elapsed)",
+                        metadata=status_thread_metadata,
+                    )
+                except Exception as exc:
+                    logger.debug("Long-running notification error: %s", exc)
+
+        notify_task = asyncio.create_task(notify_long_running())
+
+        try:
+            if policy.hard_timeout_seconds is None:
+                return await executor_task
+
+            warning_fired = False
+            while True:
+                done, _ = await asyncio.wait(
+                    {executor_task}, timeout=policy.poll_interval_seconds
+                )
+                if done:
+                    return executor_task.result()
+
+                timed_out_agent = agent_holder[0]
+                idle_seconds = self._get_agent_idle_seconds(timed_out_agent)
+
+                if (
+                    warning_fired
+                    and idle_seconds is not None
+                    and idle_seconds < (policy.warning_timeout_seconds or 0.0)
+                ):
+                    warning_fired = False
+
+                if (
+                    not warning_fired
+                    and policy.warning_timeout_seconds is not None
+                    and idle_seconds is not None
+                    and idle_seconds >= policy.warning_timeout_seconds
+                ):
+                    try:
+                        await self._send_gateway_inactivity_warning(
+                            source=source,
+                            metadata=status_thread_metadata,
+                            warning_timeout_seconds=policy.warning_timeout_seconds,
+                        )
+                        warning_fired = True
+                    except Exception as exc:
+                        logger.debug("Inactivity warning send error: %s", exc)
+
+                if (
+                    idle_seconds is not None
+                    and idle_seconds >= policy.hard_timeout_seconds
+                ):
+                    executor_task.add_done_callback(_drain_executor_result)
+                    return self._build_gateway_inactivity_timeout_response(
+                        session_key=session_key,
+                        timeout_seconds=policy.hard_timeout_seconds,
+                        timed_out_agent=timed_out_agent,
+                        result_holder=result_holder,
+                        tools_holder=tools_holder,
+                    )
+        finally:
+            notify_task.cancel()
+            try:
+                await notify_task
+            except asyncio.CancelledError:
+                pass
 
     def _get_or_create_gateway_honcho(self, session_key: str):
         """Return a persistent Honcho manager/config pair for this gateway session."""
@@ -1756,6 +2091,8 @@ class GatewayRunner:
         # simultaneous updates. Do NOT interrupt for photo-only follow-ups here;
         # let the adapter-level batching/queueing logic absorb them.
         _quick_key = self._session_key_for_source(source)
+        _gateway_timeout_policy = _resolve_gateway_inactivity_policy()
+        self._maybe_evict_stale_running_agent(_quick_key, _gateway_timeout_policy)
         if _quick_key in self._running_agents:
             if event.get_command() == "status":
                 return await self._handle_status_command(event)
@@ -1781,6 +2118,7 @@ class GatewayRunner:
                 self._pending_messages.pop(_quick_key, None)
                 if _quick_key in self._running_agents:
                     del self._running_agents[_quick_key]
+                self._running_agent_timestamps().pop(_quick_key, None)
                 logger.info("HARD STOP for session %s — session lock released", _quick_key[:20])
                 return "⚡ Force-stopped. The session is unlocked — you can send a new message."
 
@@ -1804,6 +2142,7 @@ class GatewayRunner:
                 # doesn't think an agent is still active.
                 if _quick_key in self._running_agents:
                     del self._running_agents[_quick_key]
+                self._running_agent_timestamps().pop(_quick_key, None)
                 return await self._handle_reset_command(event)
 
             # /queue <prompt> — queue without interrupting
@@ -1851,6 +2190,7 @@ class GatewayRunner:
                     # Force-clean the sentinel so the session is unlocked.
                     if _quick_key in self._running_agents:
                         del self._running_agents[_quick_key]
+                    self._running_agent_timestamps().pop(_quick_key, None)
                     logger.info("HARD STOP (pending) for session %s — sentinel cleared", _quick_key[:20])
                     return "⚡ Force-stopped. The agent was still starting — session unlocked."
                 # Queue the message so it will be picked up after the
@@ -2081,6 +2421,7 @@ class GatewayRunner:
         # "already running" guard and spin up a duplicate agent for the
         # same session — corrupting the transcript.
         self._running_agents[_quick_key] = _AGENT_PENDING_SENTINEL
+        self._running_agent_timestamps()[_quick_key] = time.time()
 
         try:
             return await self._handle_message_with_agent(event, source, _quick_key)
@@ -2091,6 +2432,7 @@ class GatewayRunner:
             # not linger or the session would be permanently locked out.
             if self._running_agents.get(_quick_key) is _AGENT_PENDING_SENTINEL:
                 del self._running_agents[_quick_key]
+            self._running_agent_timestamps().pop(_quick_key, None)
 
     async def _handle_message_with_agent(self, event, source, _quick_key: str):
         """Inner handler that runs under the _running_agents sentinel guard."""
@@ -3131,6 +3473,7 @@ class GatewayRunner:
             # Force-clean the sentinel so the session is unlocked.
             if session_key in self._running_agents:
                 del self._running_agents[session_key]
+            self._running_agent_timestamps().pop(session_key, None)
             logger.info("HARD STOP (pending) for session %s — sentinel cleared", session_key[:20])
             return "⚡ Force-stopped. The agent was still starting — session unlocked."
         if agent:
@@ -3139,6 +3482,7 @@ class GatewayRunner:
             # keep it locked forever.
             if session_key in self._running_agents:
                 del self._running_agents[session_key]
+            self._running_agent_timestamps().pop(session_key, None)
             return "⚡ Force-stopped. The session is unlocked — you can send a new message."
         else:
             return "No active task to stop."
@@ -4559,6 +4903,7 @@ class GatewayRunner:
         # Clear any running agent for this session key
         if session_key in self._running_agents:
             del self._running_agents[session_key]
+        self._running_agent_timestamps().pop(session_key, None)
 
         # Switch the session entry to point at the old session
         new_entry = self.session_store.switch_session(session_key, target_id)
@@ -5987,6 +6332,7 @@ class GatewayRunner:
                 await asyncio.sleep(0.05)
             if session_key:
                 self._running_agents[session_key] = agent_holder[0]
+                self._running_agent_timestamps()[session_key] = time.time()
         
         tracking_task = asyncio.create_task(track_agent())
         
@@ -6014,9 +6360,17 @@ class GatewayRunner:
         interrupt_monitor = asyncio.create_task(monitor_for_interrupt())
         
         try:
-            # Run in thread pool to not block
             loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(None, run_sync)
+            response = await self._await_run_sync_with_inactivity_policy(
+                loop=loop,
+                run_sync=run_sync,
+                source=source,
+                session_key=session_key or "",
+                agent_holder=agent_holder,
+                result_holder=result_holder,
+                tools_holder=tools_holder,
+                status_thread_metadata=_status_thread_metadata,
+            )
 
             # Track fallback model state: if the agent switched to a
             # fallback model during this run, persist it so /model shows
@@ -6131,6 +6485,8 @@ class GatewayRunner:
             tracking_task.cancel()
             if session_key and session_key in self._running_agents:
                 del self._running_agents[session_key]
+            if session_key:
+                self._running_agent_timestamps().pop(session_key, None)
             
             # Wait for cancelled tasks
             for task in [progress_task, interrupt_monitor, tracking_task]:

@@ -157,6 +157,8 @@ class TestProviderLabel:
         assert provider_label("kimi") == "Kimi / Moonshot"
         assert provider_label("copilot") == "GitHub Copilot"
         assert provider_label("copilot-acp") == "GitHub Copilot ACP"
+        assert provider_label("qwen-oauth") == "Qwen OAuth (Portal)"
+        assert provider_label("qwen-portal") == "Qwen OAuth (Portal)"
         assert provider_label("auto") == "Auto"
 
     def test_unknown_provider_preserves_original_name(self):

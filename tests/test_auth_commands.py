@@ -183,6 +183,39 @@ def test_auth_add_codex_oauth_persists_pool_entry(tmp_path, monkeypatch):
     assert entry["base_url"] == "https://chatgpt.com/backend-api/codex"
 
 
+def test_auth_add_qwen_oauth_persists_pool_entry(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    _write_auth_store(tmp_path, {"version": 1, "providers": {}})
+    token = _jwt_with_email("qwen@example.com")
+    monkeypatch.setattr(
+        "hermes_cli.auth.resolve_qwen_runtime_credentials",
+        lambda refresh_if_expiring=False: {
+            "provider": "qwen-oauth",
+            "base_url": "https://portal.qwen.ai/v1",
+            "api_key": token,
+            "source": "qwen-cli",
+            "expires_at_ms": 1711234567000,
+        },
+    )
+
+    from hermes_cli.auth_commands import auth_add_command
+
+    class _Args:
+        provider = "qwen-oauth"
+        auth_type = "oauth"
+        api_key = None
+        label = None
+
+    auth_add_command(_Args())
+
+    payload = json.loads((tmp_path / "hermes" / "auth.json").read_text())
+    entries = payload["credential_pool"]["qwen-oauth"]
+    entry = next(item for item in entries if item["source"] == "manual:qwen_cli")
+    assert entry["label"] == "qwen@example.com"
+    assert entry["source"] == "manual:qwen_cli"
+    assert entry["base_url"] == "https://portal.qwen.ai/v1"
+
+
 def test_auth_remove_reindexes_priorities(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
     # Prevent pool auto-seeding from host env vars and file-backed sources

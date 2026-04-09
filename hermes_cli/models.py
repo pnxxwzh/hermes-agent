@@ -261,6 +261,7 @@ _PROVIDER_LABELS = {
     "ai-gateway": "AI Gateway",
     "kilocode": "Kilo Code",
     "alibaba": "Alibaba Cloud (DashScope)",
+    "qwen-oauth": "Qwen OAuth (Portal)",
     "huggingface": "Hugging Face",
     "custom": "Custom endpoint",
 }
@@ -297,6 +298,8 @@ _PROVIDER_ALIASES = {
     "aliyun": "alibaba",
     "qwen": "alibaba",
     "alibaba-cloud": "alibaba",
+    "qwen-portal": "qwen-oauth",
+    "qwen-cli": "qwen-oauth",
     "hf": "huggingface",
     "hugging-face": "huggingface",
     "huggingface-hub": "huggingface",
@@ -334,6 +337,7 @@ def list_available_providers() -> list[dict[str, str]]:
     _PROVIDER_ORDER = [
         "openrouter", "nous", "openai-codex", "copilot", "copilot-acp",
         "huggingface", "zai", "kimi-coding", "minimax", "minimax-cn", "kilocode", "anthropic", "alibaba",
+        "qwen-oauth",
         "opencode-zen", "opencode-go",
         "ai-gateway", "deepseek", "custom",
     ]
@@ -403,6 +407,29 @@ def parse_model_input(raw: str, current_provider: str) -> tuple[str, str]:
                     return (f"custom:{custom_name}", actual_model)
             return (normalize_provider(provider_part), model_part)
     return (current_provider, stripped)
+
+
+def normalize_aggregator_model_input(model_name: str, current_provider: str) -> str:
+    """Normalize vendor:model[:variant] shorthand on aggregator providers.
+
+    Aggregators like OpenRouter and Nous use ``vendor/model`` slugs. We preserve
+    already-correct ``vendor/model:variant`` inputs, and only normalize legacy
+    shorthand when the current provider is itself an aggregator.
+    """
+    provider = normalize_provider(current_provider)
+    name = (model_name or "").strip()
+    if provider not in {"openrouter", "nous"}:
+        return name
+    if not name or "/" in name:
+        return name
+    colon = name.find(":")
+    if colon <= 0:
+        return name
+    vendor = name[:colon].strip().lower()
+    rest = name[colon + 1:].strip()
+    if not vendor or not rest:
+        return name
+    return f"{vendor}/{rest}"
 
 
 def _get_custom_base_url() -> str:

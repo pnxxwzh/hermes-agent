@@ -437,6 +437,15 @@ agent:
   # Higher = more room for complex tasks, but costs more tokens
   # Recommended: 20-30 for focused tasks, 50-100 for open exploration
   max_turns: 60
+
+  # Inactivity timeout for gateway agent runs (seconds, 0 = unlimited).
+  # The agent may continue indefinitely while tools/API responses are active.
+  # Timeout only fires after a fully idle stretch.
+  # gateway_timeout: 1800
+
+  # Staged warning threshold (seconds, 0 = disabled).
+  # Fires once per idle stretch before escalating to the full timeout.
+  # gateway_timeout_warning: 900
   
   # Enable verbose logging
   verbose: false
@@ -636,9 +645,10 @@ platform_toolsets:
 # Voice Transcription (Speech-to-Text)
 # =============================================================================
 # Automatically transcribe voice messages on messaging platforms.
-# Requires OPENAI_API_KEY in .env (uses OpenAI Whisper API directly).
+# Provider auto-detect order: local -> Groq -> OpenAI -> Mistral Voxtral.
 stt:
   enabled: true
+  # provider: "local"   # local | local_command | groq | openai | mistral
   model: "whisper-1"  # whisper-1 (cheapest) | gpt-4o-mini-transcribe | gpt-4o-transcribe
 
 # =============================================================================

@@ -8,7 +8,9 @@ end-to-end dispatch.  All external dependencies are mocked.
 import os
 import struct
 import subprocess
+import types
 import wave
+from importlib.machinery import ModuleSpec
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -48,6 +50,7 @@ def clean_env(monkeypatch):
     monkeypatch.delenv("VOICE_TOOLS_OPENAI_KEY", raising=False)
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("GROQ_API_KEY", raising=False)
+    monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
     monkeypatch.delenv("HERMES_LOCAL_STT_COMMAND", raising=False)
     monkeypatch.delenv("HERMES_LOCAL_STT_LANGUAGE", raising=False)
 
@@ -100,6 +103,16 @@ class TestGetProviderFallbackPriority:
              patch("tools.transcription_tools._HAS_OPENAI", True):
             from tools.transcription_tools import _get_provider
             assert _get_provider({}) == "groq"
+
+    def test_auto_detect_prefers_openai_over_mistral(self, monkeypatch):
+        monkeypatch.setenv("VOICE_TOOLS_OPENAI_KEY", "sk-test")
+        monkeypatch.setenv("MISTRAL_API_KEY", "mistral-test")
+        with patch("tools.transcription_tools._HAS_FASTER_WHISPER", False), \
+             patch("tools.transcription_tools._has_local_command", return_value=False), \
+             patch("tools.transcription_tools._HAS_OPENAI", True), \
+             patch("tools.transcription_tools._HAS_MISTRAL", True):
+            from tools.transcription_tools import _get_provider
+            assert _get_provider({}) == "openai"
 
     def test_explicit_openai_no_key_returns_none(self, monkeypatch):
         """Explicit openai with no key returns none — no cross-provider fallback."""
@@ -346,6 +359,126 @@ class TestTranscribeOpenAIExtended:
 
         assert result["success"] is False
         assert "Permission denied" in result["error"]
+
+
+@pytest.fixture
+def mock_mistral_module():
+    """Inject a fake mistralai module into sys.modules for testing."""
+    mock_client = MagicMock()
+    mock_client.__enter__ = MagicMock(return_value=mock_client)
+    mock_client.__exit__ = MagicMock(return_value=False)
+    mock_mistral_cls = MagicMock(return_value=mock_client)
+    fake_module = types.ModuleType("mistralai")
+    fake_module.Mistral = mock_mistral_cls
+    fake_module.__spec__ = ModuleSpec("mistralai", loader=None)
+    fake_client_module = types.ModuleType("mistralai.client")
+    fake_client_module.Mistral = mock_mistral_cls
+    fake_client_module.__spec__ = ModuleSpec("mistralai.client", loader=None)
+    with patch.dict(
+        "sys.modules",
+        {"mistralai": fake_module, "mistralai.client": fake_client_module},
+    ):
+        yield mock_client
+
+
+class TestTranscribeMistral:
+    def test_no_key(self, monkeypatch):
+        monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+        with patch("tools.transcription_tools._HAS_MISTRAL", True):
+            from tools.transcription_tools import _transcribe_mistral
+            result = _transcribe_mistral("/tmp/test.ogg", "voxtral-mini-latest")
+        assert result["success"] is False
+        assert "MISTRAL_API_KEY" in result["error"]
+
+    def test_package_not_installed(self, monkeypatch):
+        monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+        with patch("tools.transcription_tools._HAS_MISTRAL", False):
+            from tools.transcription_tools import _transcribe_mistral
+            result = _transcribe_mistral("/tmp/test.ogg", "voxtral-mini-latest")
+        assert result["success"] is False
+        assert "mistralai package" in result["error"]
+
+    def test_successful_transcription(self, monkeypatch, sample_ogg, mock_mistral_module):
+        monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+        mock_result = MagicMock()
+        mock_result.text = "hello from mistral"
+        mock_mistral_module.audio.transcriptions.complete.return_value = mock_result
+
+        with patch("tools.transcription_tools._HAS_MISTRAL", True):
+            from tools.transcription_tools import _transcribe_mistral
+            result = _transcribe_mistral(sample_ogg, "voxtral-mini-latest")
+
+        assert result["success"] is True
+        assert result["transcript"] == "hello from mistral"
+        assert result["provider"] == "mistral"
+        mock_mistral_module.audio.transcriptions.complete.assert_called_once()
+
+    def test_api_error_returns_failure(self, monkeypatch, sample_ogg, mock_mistral_module):
+        monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+        mock_mistral_module.audio.transcriptions.complete.side_effect = RuntimeError("secret-key-leaked")
+
+        with patch("tools.transcription_tools._HAS_MISTRAL", True):
+            from tools.transcription_tools import _transcribe_mistral
+            result = _transcribe_mistral(sample_ogg, "voxtral-mini-latest")
+
+        assert result["success"] is False
+        assert "RuntimeError" in result["error"]
+        assert "secret-key-leaked" not in result["error"]
+
+
+class TestGetProviderMistral:
+    def test_mistral_when_key_and_sdk_available(self, monkeypatch):
+        monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+        with patch("tools.transcription_tools._HAS_MISTRAL", True):
+            from tools.transcription_tools import _get_provider
+            assert _get_provider({"provider": "mistral"}) == "mistral"
+
+    def test_mistral_explicit_no_key_returns_none(self, monkeypatch):
+        monkeypatch.delenv("MISTRAL_API_KEY", raising=False)
+        with patch("tools.transcription_tools._HAS_MISTRAL", True):
+            from tools.transcription_tools import _get_provider
+            assert _get_provider({"provider": "mistral"}) == "none"
+
+    def test_auto_detect_mistral_after_openai(self, monkeypatch):
+        monkeypatch.delenv("GROQ_API_KEY", raising=False)
+        monkeypatch.delenv("VOICE_TOOLS_OPENAI_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+        with patch("tools.transcription_tools._HAS_FASTER_WHISPER", False), \
+             patch("tools.transcription_tools._has_local_command", return_value=False), \
+             patch("tools.transcription_tools._HAS_OPENAI", False), \
+             patch("tools.transcription_tools._HAS_MISTRAL", True):
+            from tools.transcription_tools import _get_provider
+            assert _get_provider({}) == "mistral"
+
+
+class TestTranscribeAudioMistralDispatch:
+    def test_dispatches_to_mistral(self, sample_ogg):
+        with patch("tools.transcription_tools._load_stt_config", return_value={"provider": "mistral"}), \
+             patch("tools.transcription_tools._get_provider", return_value="mistral"), \
+             patch(
+                 "tools.transcription_tools._transcribe_mistral",
+                 return_value={"success": True, "transcript": "hi", "provider": "mistral"},
+             ) as mock_mistral:
+            from tools.transcription_tools import transcribe_audio
+            result = transcribe_audio(sample_ogg)
+
+        assert result["success"] is True
+        assert result["provider"] == "mistral"
+        mock_mistral.assert_called_once()
+
+    def test_config_mistral_model_used(self, sample_ogg):
+        config = {"provider": "mistral", "mistral": {"model": "voxtral-mini-2602"}}
+        with patch("tools.transcription_tools._load_stt_config", return_value=config), \
+             patch("tools.transcription_tools._get_provider", return_value="mistral"), \
+             patch(
+                 "tools.transcription_tools._transcribe_mistral",
+                 return_value={"success": True, "transcript": "hi"},
+             ) as mock_mistral:
+            from tools.transcription_tools import transcribe_audio
+            transcribe_audio(sample_ogg, model=None)
+
+        assert mock_mistral.call_args[0][1] == "voxtral-mini-2602"
 
 
 class TestTranscribeLocalCommand:

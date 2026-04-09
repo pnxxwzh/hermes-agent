@@ -221,12 +221,21 @@ DEFAULT_CONFIG = {
     },
     "agent": {
         "max_turns": 90,
+        # Inactivity timeout for gateway agent execution (seconds).
+        # The agent can run indefinitely as long as it's actively calling
+        # tools or receiving API responses. Only fires after a full idle
+        # period. 0 = unlimited.
+        "gateway_timeout": 1800,
         # Tool-use enforcement: injects system prompt guidance that tells the
         # model to actually call tools instead of describing intended actions.
         # Values: "auto" (default — applies to gpt/codex models), true/false
         # (force on/off for all models), or a list of model-name substrings
         # to match (e.g. ["gpt", "codex", "gemini", "qwen"]).
         "tool_use_enforcement": "auto",
+        # Staged inactivity warning threshold (seconds). Fires once per idle
+        # stretch before escalating to the full gateway timeout. 0 disables
+        # the warning layer.
+        "gateway_timeout_warning": 900,
         "context_engine": {
             "unified_input_engine": False,
             "unified_input_shadow_compare": True,
@@ -711,6 +720,14 @@ OPTIONAL_ENV_VARS = {
         "category": "provider",
         "advanced": True,
     },
+    "HERMES_QWEN_BASE_URL": {
+        "description": "Qwen Portal base URL override (default: https://portal.qwen.ai/v1)",
+        "prompt": "Qwen Portal base URL (leave empty for default)",
+        "url": None,
+        "password": False,
+        "category": "provider",
+        "advanced": True,
+    },
     "OPENCODE_ZEN_API_KEY": {
         "description": "OpenCode Zen API key (pay-as-you-go access to curated models)",
         "prompt": "OpenCode Zen API key",
@@ -861,6 +878,14 @@ OPTIONAL_ENV_VARS = {
         "prompt": "OpenAI API Key (for Whisper STT + TTS)",
         "url": "https://platform.openai.com/api-keys",
         "tools": ["voice_transcription", "openai_tts"],
+        "password": True,
+        "category": "tool",
+    },
+    "MISTRAL_API_KEY": {
+        "description": "Mistral API key for Voxtral speech-to-text transcription",
+        "prompt": "Mistral API key (for Voxtral STT)",
+        "url": "https://console.mistral.ai/api-keys/",
+        "tools": ["voice_transcription"],
         "password": True,
         "category": "tool",
     },
@@ -1883,6 +1908,8 @@ def show_config():
     keys = [
         ("OPENROUTER_API_KEY", "OpenRouter"),
         ("VOICE_TOOLS_OPENAI_KEY", "OpenAI (STT/TTS)"),
+        ("MISTRAL_API_KEY", "Mistral (Voxtral STT)"),
+        ("HERMES_QWEN_BASE_URL", "Qwen OAuth (Portal)"),
         ("EXA_API_KEY", "Exa"),
         ("PARALLEL_API_KEY", "Parallel"),
         ("FIRECRAWL_API_KEY", "Firecrawl"),

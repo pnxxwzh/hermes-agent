@@ -14,6 +14,7 @@ import copy
 import json
 import logging
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 from hermes_constants import get_hermes_home
@@ -140,12 +141,46 @@ _CLAUDE_CODE_SYSTEM_PREFIX = "You are Claude Code, Anthropic's official CLI for 
 _MCP_TOOL_PREFIX = "mcp_"
 
 
+@dataclass(frozen=True)
+class AnthropicEndpointPolicy:
+    """Resolved Anthropic endpoint behavior for auth and message shaping."""
+
+    base_url: str
+    is_official_anthropic: bool
+    is_third_party_compatible: bool
+    requires_bearer_auth: bool
+    strip_thinking_signatures: bool
+
+
 def _get_claude_code_version() -> str:
     """Lazily detect the installed Claude Code version when OAuth headers need it."""
     global _claude_code_version_cache
     if _claude_code_version_cache is None:
         _claude_code_version_cache = _detect_claude_code_version()
     return _claude_code_version_cache
+
+
+def _normalize_endpoint_base_url(base_url: Any) -> str:
+    """Normalize base URLs from strings, httpx.URL, or None."""
+    return str(base_url or "").strip().rstrip("/")
+
+
+def resolve_anthropic_endpoint_policy(base_url: Any = None) -> AnthropicEndpointPolicy:
+    """Resolve endpoint compatibility policy for Anthropic-style requests."""
+    normalized = _normalize_endpoint_base_url(base_url)
+    normalized_lower = normalized.lower()
+    is_official = bool(normalized) and "anthropic.com" in normalized_lower
+    is_third_party = bool(normalized) and not is_official
+    requires_bearer = normalized_lower.startswith(
+        "https://api.minimax.io/anthropic"
+    ) or normalized_lower.startswith("https://api.minimaxi.com/anthropic")
+    return AnthropicEndpointPolicy(
+        base_url=normalized,
+        is_official_anthropic=is_official,
+        is_third_party_compatible=is_third_party,
+        requires_bearer_auth=requires_bearer,
+        strip_thinking_signatures=is_third_party,
+    )
 
 
 def _is_oauth_token(key: str) -> bool:
@@ -170,12 +205,7 @@ def _is_third_party_anthropic_endpoint(base_url: str | None) -> bool:
     with their own API keys via x-api-key, not Anthropic OAuth tokens. OAuth
     detection should be skipped for these endpoints.
     """
-    if not base_url:
-        return False  # No base_url = direct Anthropic API
-    normalized = base_url.rstrip("/").lower()
-    if "anthropic.com" in normalized:
-        return False  # Direct Anthropic API — OAuth applies
-    return True  # Any other endpoint is a third-party proxy
+    return resolve_anthropic_endpoint_policy(base_url).is_third_party_compatible
 
 
 def _requires_bearer_auth(base_url: str | None) -> bool:
@@ -185,15 +215,10 @@ def _requires_bearer_auth(base_url: str | None) -> bool:
     require Authorization: Bearer instead of Anthropic's native x-api-key header.
     MiniMax's global and China Anthropic-compatible endpoints follow this pattern.
     """
-    if not base_url:
-        return False
-    normalized = base_url.rstrip("/").lower()
-    return normalized.startswith("https://api.minimax.io/anthropic") or normalized.startswith(
-        "https://api.minimaxi.com/anthropic"
-    )
+    return resolve_anthropic_endpoint_policy(base_url).requires_bearer_auth
 
 
-def build_anthropic_client(api_key: str, base_url: str = None):
+def build_anthropic_client(api_key: str, base_url: Any = None):
     """Create an Anthropic client, auto-detecting setup-tokens vs API keys.
 
     Returns an anthropic.Anthropic instance.
@@ -208,10 +233,11 @@ def build_anthropic_client(api_key: str, base_url: str = None):
     kwargs = {
         "timeout": Timeout(timeout=900.0, connect=10.0),
     }
-    if base_url:
-        kwargs["base_url"] = base_url
+    endpoint_policy = resolve_anthropic_endpoint_policy(base_url)
+    if endpoint_policy.base_url:
+        kwargs["base_url"] = endpoint_policy.base_url
 
-    if _requires_bearer_auth(base_url):
+    if endpoint_policy.requires_bearer_auth:
         # Some Anthropic-compatible providers (e.g. MiniMax) expect the API key in
         # Authorization: Bearer even for regular API keys. Route those endpoints
         # through auth_token so the SDK sends Bearer auth instead of x-api-key.
@@ -221,7 +247,7 @@ def build_anthropic_client(api_key: str, base_url: str = None):
         kwargs["auth_token"] = api_key
         if _COMMON_BETAS:
             kwargs["default_headers"] = {"anthropic-beta": ",".join(_COMMON_BETAS)}
-    elif _is_third_party_anthropic_endpoint(base_url):
+    elif endpoint_policy.is_third_party_compatible:
         # Third-party proxies (Azure AI Foundry, AWS Bedrock, etc.) use their
         # own API keys with x-api-key auth. Skip OAuth detection — their keys
         # don't follow Anthropic's sk-ant-* prefix convention and would be
@@ -1020,6 +1046,7 @@ def _extract_preserved_thinking_blocks(message: Dict[str, Any]) -> List[Dict[str
 
 def convert_messages_to_anthropic(
     messages: List[Dict],
+    endpoint_policy: Optional[AnthropicEndpointPolicy] = None,
 ) -> Tuple[Optional[Any], List[Dict]]:
     """Convert OpenAI-format messages to Anthropic format.
 
@@ -1027,6 +1054,7 @@ def convert_messages_to_anthropic(
     System messages are extracted since Anthropic takes them as a separate param.
     system_prompt is a string or list of content blocks (when cache_control present).
     """
+    endpoint_policy = endpoint_policy or resolve_anthropic_endpoint_policy(None)
     system = None
     result = []
 
@@ -1243,7 +1271,7 @@ def convert_messages_to_anthropic(
                 if block.get("type") == "redacted_thinking":
                     if block.get("data"):
                         new_content.append(block)
-                elif block.get("signature"):
+                elif block.get("signature") and not endpoint_policy.strip_thinking_signatures:
                     new_content.append(block)
                 else:
                     thinking_text = block.get("thinking", "")
@@ -1260,6 +1288,7 @@ def convert_messages_to_anthropic(
 
 def convert_messages_to_anthropic_metric_view(
     messages: List[Dict[str, Any]],
+    endpoint_policy: Optional[AnthropicEndpointPolicy] = None,
 ) -> Tuple[Optional[Any], List[Dict[str, Any]]]:
     """Return a metrics-oriented view of Anthropic-visible messages.
 
@@ -1267,7 +1296,10 @@ def convert_messages_to_anthropic_metric_view(
     preserving Hermes's semantic tool buckets by materializing tool_result
     blocks back into pseudo ``role="tool"`` messages for accounting.
     """
-    system, anthropic_messages = convert_messages_to_anthropic(messages)
+    system, anthropic_messages = convert_messages_to_anthropic(
+        messages,
+        endpoint_policy=endpoint_policy,
+    )
     metric_messages: List[Dict[str, Any]] = []
 
     for message in anthropic_messages:
@@ -1308,6 +1340,7 @@ def build_anthropic_kwargs(
     is_oauth: bool = False,
     preserve_dots: bool = False,
     context_length: Optional[int] = None,
+    base_url: Any = None,
 ) -> Dict[str, Any]:
     """Build kwargs for anthropic.messages.create().
 
@@ -1322,7 +1355,11 @@ def build_anthropic_kwargs(
     When *preserve_dots* is True, model name dots are not converted to hyphens
     (for Alibaba/DashScope anthropic-compatible endpoints: qwen3.5-plus).
     """
-    system, anthropic_messages = convert_messages_to_anthropic(messages)
+    endpoint_policy = resolve_anthropic_endpoint_policy(base_url)
+    system, anthropic_messages = convert_messages_to_anthropic(
+        messages,
+        endpoint_policy=endpoint_policy,
+    )
     anthropic_tools = convert_tools_to_anthropic(tools) if tools else []
 
     model = normalize_model_name(model, preserve_dots=preserve_dots)

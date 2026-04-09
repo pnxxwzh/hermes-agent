@@ -37,6 +37,7 @@ import tempfile
 import time
 import threading
 import weakref
+from dataclasses import dataclass
 from types import SimpleNamespace
 import uuid
 from typing import List, Dict, Any, Optional
@@ -84,7 +85,7 @@ from agent.model_metadata import (
     fetch_model_metadata,
     estimate_tokens_rough, estimate_messages_tokens_rough, estimate_request_tokens_rough,
     get_next_probe_tier, parse_context_limit_from_error,
-    save_context_length,
+    save_context_length, is_local_endpoint,
 )
 from agent.context_compressor import ContextCompressor
 from agent.prompt_caching import apply_anthropic_cache_control
@@ -110,6 +111,46 @@ HONCHO_TOOL_NAMES = {
     "honcho_search",
     "honcho_conclude",
 }
+
+
+@dataclass(frozen=True)
+class StreamTimeoutPolicy:
+    """Resolved stale-stream timeout behavior for the current request."""
+
+    stale_timeout_seconds: float
+    is_user_explicit: bool
+    disabled_for_local: bool
+
+
+def _resolve_stream_timeout_policy(
+    *,
+    api_kwargs: Dict[str, Any],
+    base_url: str | None,
+) -> StreamTimeoutPolicy:
+    """Resolve stale-stream timeout behavior without leaking policy into the loop."""
+    explicit_value = os.getenv("HERMES_STREAM_STALE_TIMEOUT")
+    is_user_explicit = explicit_value is not None
+    timeout_base = float(explicit_value if explicit_value is not None else 180.0)
+    if is_local_endpoint(base_url or "") and not is_user_explicit:
+        return StreamTimeoutPolicy(
+            stale_timeout_seconds=0.0,
+            is_user_explicit=False,
+            disabled_for_local=True,
+        )
+
+    est_tokens = sum(len(str(v)) for v in api_kwargs.get("messages", [])) // 4
+    if est_tokens > 100_000:
+        timeout_seconds = max(timeout_base, 300.0)
+    elif est_tokens > 50_000:
+        timeout_seconds = max(timeout_base, 240.0)
+    else:
+        timeout_seconds = timeout_base
+
+    return StreamTimeoutPolicy(
+        stale_timeout_seconds=timeout_seconds,
+        is_user_explicit=is_user_explicit,
+        disabled_for_local=False,
+    )
 
 
 class _SafeWriter:
@@ -3451,15 +3492,22 @@ class AIAgent:
         )
         if self.api_mode == "anthropic_messages":
             try:
-                from agent.anthropic_adapter import convert_messages_to_anthropic_metric_view
+                from agent.anthropic_adapter import (
+                    convert_messages_to_anthropic_metric_view,
+                    resolve_anthropic_endpoint_policy,
+                )
 
                 prepared_messages = self._prepare_anthropic_messages_for_api(
                     [{"role": "system", "content": effective_system}] + final_conversation_messages
                     if effective_system
                     else list(final_conversation_messages)
                 )
+                endpoint_policy = resolve_anthropic_endpoint_policy(
+                    getattr(self, "_anthropic_base_url", None) or getattr(self, "base_url", None)
+                )
                 _, final_conversation_messages = convert_messages_to_anthropic_metric_view(
-                    prepared_messages
+                    prepared_messages,
+                    endpoint_policy=endpoint_policy,
                 )
             except Exception as exc:
                 logger.warning(
@@ -5108,19 +5156,13 @@ class AIAgent:
                 if request_client is not None:
                     self._close_request_openai_client(request_client, reason="stream_request_complete")
 
-        _stream_stale_timeout_base = float(os.getenv("HERMES_STREAM_STALE_TIMEOUT", 180.0))
-        # Scale the stale timeout for large contexts: slow models (like Opus)
-        # can legitimately think for minutes before producing the first token
-        # when the context is large.  Without this, the stale detector kills
-        # healthy connections during the model's thinking phase, producing
-        # spurious RemoteProtocolError ("peer closed connection").
-        _est_tokens = sum(len(str(v)) for v in api_kwargs.get("messages", [])) // 4
-        if _est_tokens > 100_000:
-            _stream_stale_timeout = max(_stream_stale_timeout_base, 300.0)
-        elif _est_tokens > 50_000:
-            _stream_stale_timeout = max(_stream_stale_timeout_base, 240.0)
-        else:
-            _stream_stale_timeout = _stream_stale_timeout_base
+        _stream_timeout_policy = _resolve_stream_timeout_policy(
+            api_kwargs=api_kwargs,
+            base_url=getattr(self, "_anthropic_base_url", None)
+            if self.api_mode == "anthropic_messages"
+            else getattr(self, "base_url", None),
+        )
+        _stream_stale_timeout = _stream_timeout_policy.stale_timeout_seconds
 
         t = threading.Thread(target=_call, daemon=True)
         t.start()
@@ -5130,7 +5172,10 @@ class AIAgent:
             # Detect stale streams: connections kept alive by SSE pings
             # but delivering no real chunks.  Kill the client so the
             # inner retry loop can start a fresh connection.
-            if time.time() - last_chunk_time["t"] > _stream_stale_timeout:
+            if (
+                not _stream_timeout_policy.disabled_for_local
+                and time.time() - last_chunk_time["t"] > _stream_stale_timeout
+            ):
                 logger.warning(
                     "Stream stale for %.0fs — no chunks received. Killing connection.",
                     _stream_stale_timeout,
@@ -5448,6 +5493,7 @@ class AIAgent:
                 is_oauth=self._is_anthropic_oauth,
                 preserve_dots=self._anthropic_preserve_dots(),
                 context_length=ctx_len,
+                base_url=getattr(self, "_anthropic_base_url", None) or getattr(self, "base_url", None),
             )
 
         if self.api_mode == "codex_responses":
@@ -5922,7 +5968,11 @@ class AIAgent:
 
             # Use auxiliary client for the flush call when available --
             # it's cheaper and avoids Codex Responses API incompatibility.
-            from agent.auxiliary_client import call_llm as _call_llm
+            from agent.auxiliary_client import (
+                call_llm as _call_llm,
+                _get_task_timeout as _get_aux_task_timeout,
+            )
+            flush_timeout = _get_aux_task_timeout("flush_memories")
             _aux_available = True
             try:
                 response = _call_llm(
@@ -5931,7 +5981,7 @@ class AIAgent:
                     tools=tool_defs,
                     temperature=0.3,
                     max_tokens=5120,
-                    timeout=30.0,
+                    timeout=flush_timeout,
                 )
             except RuntimeError:
                 _aux_available = False
@@ -5963,7 +6013,10 @@ class AIAgent:
                     "temperature": 0.3,
                     **self._max_tokens_param(5120),
                 }
-                response = self._ensure_primary_openai_client(reason="flush_memories").chat.completions.create(**api_kwargs, timeout=30.0)
+                response = self._ensure_primary_openai_client(reason="flush_memories").chat.completions.create(
+                    **api_kwargs,
+                    timeout=flush_timeout,
+                )
 
             # Extract tool calls from the response, handling all API formats
             tool_calls = []
