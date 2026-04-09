@@ -285,6 +285,187 @@ The bot should come online in Discord within a few seconds. Send it a message �
 You can run `hermes gateway` in the background or as a systemd service for persistent operation. See the deployment docs for details.
 :::
 
+## Configuration Reference
+
+Discord behavior is controlled through two files: **`~/.hermes/.env`** for credentials and env-level toggles, and **`~/.hermes/config.yaml`** for structured settings. Environment variables always take precedence over config.yaml values when both are set.
+
+### Environment Variables (`.env`)
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `DISCORD_BOT_TOKEN` | **Yes** | — | Bot token from the [Discord Developer Portal](https://discord.com/developers/applications). |
+| `DISCORD_ALLOWED_USERS` | **Yes** | — | Comma-separated Discord user IDs allowed to interact with the bot. Without this, the gateway denies all users. |
+| `DISCORD_HOME_CHANNEL` | No | — | Channel ID where the bot sends proactive messages (cron output, reminders, notifications). |
+| `DISCORD_HOME_CHANNEL_NAME` | No | `"Home"` | Display name for the home channel in logs and status output. |
+| `DISCORD_REQUIRE_MENTION` | No | `true` | When `true`, the bot only responds in server channels when `@mentioned`. Set to `false` to respond to all messages in every channel. |
+| `DISCORD_FREE_RESPONSE_CHANNELS` | No | — | Comma-separated channel IDs where the bot responds without requiring an `@mention`, even when `DISCORD_REQUIRE_MENTION` is `true`. |
+| `DISCORD_IGNORE_NO_MENTION` | No | `true` | When `true`, the bot stays silent if a message `@mentions` other users but does **not** mention the bot. Prevents the bot from jumping into conversations directed at other people. Only applies in server channels, not DMs. |
+| `DISCORD_AUTO_THREAD` | No | `true` | When `true`, automatically creates a new thread for every `@mention` in a text channel, so each conversation is isolated (similar to Slack behavior). Messages already inside threads or DMs are unaffected. |
+| `DISCORD_ALLOW_BOTS` | No | `"none"` | Controls how the bot handles messages from other Discord bots. `"none"` — ignore all other bots. `"mentions"` — only accept bot messages that `@mention` Hermes. `"all"` — accept all bot messages. |
+| `DISCORD_REACTIONS` | No | `true` | When `true`, the bot adds emoji reactions to messages during processing (👀 when starting, ✅ on success, ❌ on error). Set to `false` to disable reactions entirely. |
+| `DISCORD_IGNORED_CHANNELS` | No | — | Comma-separated channel IDs where the bot **never** responds, even when `@mentioned`. Takes priority over all other channel settings. |
+| `DISCORD_NO_THREAD_CHANNELS` | No | — | Comma-separated channel IDs where the bot responds directly in the channel instead of creating a thread. Only relevant when `DISCORD_AUTO_THREAD` is `true`. |
+| `DISCORD_REPLY_TO_MODE` | No | `"first"` | Controls reply-reference behavior: `"off"` — never reply to the original message, `"first"` — reply-reference on the first message chunk only (default), `"all"` — reply-reference on every chunk. |
+
+### Config File (`config.yaml`)
+
+The `discord` section in `~/.hermes/config.yaml` mirrors the env vars above. Config.yaml settings are applied as defaults — if the equivalent env var is already set, the env var wins.
+
+```yaml
+# Discord-specific settings
+discord:
+  require_mention: true           # Require @mention in server channels
+  free_response_channels: ""      # Comma-separated channel IDs (or YAML list)
+  auto_thread: true               # Auto-create threads on @mention
+  reactions: true                 # Add emoji reactions during processing
+  ignored_channels: []            # Channel IDs where bot never responds
+  no_thread_channels: []          # Channel IDs where bot responds without threading
+
+# Session isolation (applies to all gateway platforms, not just Discord)
+group_sessions_per_user: true     # Isolate sessions per user in shared channels
+```
+
+#### `discord.require_mention`
+
+**Type:** boolean — **Default:** `true`
+
+When enabled, the bot only responds in server channels when directly `@mentioned`. DMs always get a response regardless of this setting.
+
+#### `discord.free_response_channels`
+
+**Type:** string or list — **Default:** `""`
+
+Channel IDs where the bot responds to all messages without needing an `@mention`. Accepts either a comma-separated string or a YAML list:
+
+```yaml
+# String format
+discord:
+  free_response_channels: "1234567890,9876543210"
+
+# List format
+discord:
+  free_response_channels:
+    - 1234567890
+    - 9876543210
+```
+
+If a thread's parent channel is in this list, the thread also becomes mention-free.
+
+#### `discord.auto_thread`
+
+**Type:** boolean — **Default:** `true`
+
+When enabled, every `@mention` in a regular text channel automatically creates a new thread for the conversation. This keeps the main channel clean and gives each conversation its own isolated session history. Once a thread is created, subsequent messages in that thread don't require `@mention` — the bot knows it's already participating.
+
+Messages sent in existing threads or DMs are unaffected by this setting.
+
+#### `discord.reactions`
+
+**Type:** boolean — **Default:** `true`
+
+Controls whether the bot adds emoji reactions to messages as visual feedback:
+- 👀 added when the bot starts processing your message
+- ✅ added when the response is delivered successfully
+- ❌ added if an error occurs during processing
+
+Disable this if you find the reactions distracting or if the bot's role doesn't have the **Add Reactions** permission.
+
+#### `discord.ignored_channels`
+
+**Type:** string or list — **Default:** `[]`
+
+Channel IDs where the bot **never** responds, even when directly `@mentioned`. This takes the highest priority — if a channel is in this list, the bot silently ignores all messages there, regardless of `require_mention`, `free_response_channels`, or any other setting.
+
+```yaml
+# String format
+discord:
+  ignored_channels: "1234567890,9876543210"
+
+# List format
+discord:
+  ignored_channels:
+    - 1234567890
+    - 9876543210
+```
+
+If a thread's parent channel is in this list, messages in that thread are also ignored.
+
+#### `discord.no_thread_channels`
+
+**Type:** string or list — **Default:** `[]`
+
+Channel IDs where the bot responds directly in the channel instead of auto-creating a thread. This only has an effect when `auto_thread` is `true` (the default). In these channels, the bot responds inline like a normal message rather than spawning a new thread.
+
+```yaml
+discord:
+  no_thread_channels:
+    - 1234567890  # Bot responds inline here
+```
+
+Useful for channels dedicated to bot interaction where threads would add unnecessary noise.
+
+#### `group_sessions_per_user`
+
+**Type:** boolean — **Default:** `true`
+
+This is a global gateway setting (not Discord-specific) that controls whether users in the same channel get isolated session histories.
+
+When `true`: Alice and Bob talking in `#research` each have their own separate conversation with Hermes. When `false`: the entire channel shares one conversation transcript and one running-agent slot.
+
+```yaml
+group_sessions_per_user: true
+```
+
+See the [Session Model](#session-model-in-discord) section above for the full implications of each mode.
+
+#### `display.tool_progress`
+
+**Type:** string — **Default:** `"all"` — **Values:** `off`, `new`, `all`, `verbose`
+
+Controls whether the bot sends progress messages in the chat while processing (e.g., "Reading file...", "Running terminal command..."). This is a global gateway setting that applies to all platforms.
+
+```yaml
+display:
+  tool_progress: "all"    # off | new | all | verbose
+```
+
+- `off` — no progress messages
+- `new` — only show the first tool call per turn
+- `all` — show all tool calls (truncated to 40 characters in gateway messages)
+- `verbose` — show full tool call details (can produce long messages)
+
+#### `display.tool_progress_command`
+
+**Type:** boolean — **Default:** `false`
+
+When enabled, makes the `/verbose` slash command available in the gateway, letting you cycle through tool progress modes (`off → new → all → verbose → off`) without editing config.yaml.
+
+```yaml
+display:
+  tool_progress_command: true
+```
+
+## Interactive Model Picker
+
+Send `/model` with no arguments in a Discord channel to open a dropdown-based model picker:
+
+1. **Provider selection** — a Select dropdown showing available providers (up to 25).
+2. **Model selection** — a second dropdown with models for the chosen provider (up to 25).
+
+The picker times out after 120 seconds. Only authorized users (those in `DISCORD_ALLOWED_USERS`) can interact with it. If you know the model name, type `/model <name>` directly.
+
+## Native Slash Commands for Skills
+
+Hermes automatically registers installed skills as **native Discord Application Commands**. This means skills appear in Discord's autocomplete `/` menu alongside built-in commands.
+
+- Each skill becomes a Discord slash command (e.g., `/code-review`, `/ascii-art`)
+- Skills accept an optional `args` string parameter
+- Discord has a limit of 100 application commands per bot — if you have more skills than available slots, extra skills are skipped with a warning in the logs
+- Skills are registered during bot startup alongside built-in commands like `/model`, `/reset`, and `/background`
+
+No extra configuration is needed — any skill installed via `hermes skills install` is automatically registered as a Discord slash command on the next gateway restart.
+
+>>>>>>> 7d26feb9 (feat(discord): add DISCORD_REPLY_TO_MODE setting (#6333))
 ## Home Channel
 
 You can designate a "home channel" where the bot sends proactive messages (such as cron job output, reminders, and notifications). There are two ways to set it:
@@ -373,6 +554,5 @@ Always set `DISCORD_ALLOWED_USERS` to restrict who can interact with the bot. Wi
 :::
 
 For more information on securing your Hermes Agent deployment, see the [Security Guide](../security.md).
-
 
 
